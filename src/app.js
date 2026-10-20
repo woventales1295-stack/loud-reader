@@ -1,0 +1,1933 @@
+<script>
+"use strict";
+/* ---------- boot: decode inlined libraries, then start the app ---------- */
+function b64text(id){
+  const b64 = document.getElementById(id).textContent.trim();
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder("utf-8").decode(bytes);
+}
+function b64bytes(id){
+  const b64 = document.getElementById(id).textContent.trim();
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+function blobURL(text, type){ return URL.createObjectURL(new Blob([text], { type: type || "text/javascript" })); }
+function loadJS(text){
+  return new Promise((res, rej) => {
+    const s = document.createElement("script"); s.src = blobURL(text);
+    s.onload = () => res(); s.onerror = () => rej(new Error("script load failed"));
+    document.head.appendChild(s);
+  });
+}
+/* v2: heavy optional libraries are decoded only when first needed. */
+let _unrarP=null, _mobiP=null;
+function ensureUnrar(){
+  if(!_unrarP){
+    _unrarP=(async()=>{ if(!window.UnrarJS) await loadJS(b64text("lib-unrar")); return window.UnrarJS; })();
+    _unrarP.catch(()=>{ _unrarP=null; });
+  }
+  return _unrarP;
+}
+function ensureMobi(){
+  // mobi.js (foliate-js) is an ES module: load it through a blob: URL.
+  if(!_mobiP){
+    _mobiP=import(blobURL(b64text("lib-mobi")));
+    _mobiP.catch(()=>{ _mobiP=null; });
+  }
+  return _mobiP;
+}
+(async function boot(){
+  try{
+    await loadJS(b64text("lib-pdf"));
+    await loadJS(b64text("lib-mammoth"));
+    await loadJS(b64text("lib-jszip"));
+    await loadJS(b64text("tess-main"));          // Tesseract main (small); worker/core stay embedded until OCR runs
+    pdfjsLib.GlobalWorkerOptions.workerSrc = blobURL(b64text("lib-pdfworker"));
+    document.getElementById("boot").remove();
+    appInit();
+  }catch(e){
+    console.error(e);
+    document.getElementById("boot").textContent = "Failed to initialize: " + e.message;
+  }
+})();
+
+/* ============================================================
+   The app  (started by boot() once libraries are ready)
+   ============================================================ */
+function appInit(){
+const $ = (s) => document.querySelector(s);
+const el = (t, c) => { const e = document.createElement(t); if (c) e.className = c; return e; };
+const fmtSize = (b) => b < 1024 ? b+" B" : b < 1048576 ? (b/1024).toFixed(0)+" KB" : (b/1048576).toFixed(1)+" MB";
+const setStatus = (t) => { $("#status").textContent = t; };
+const extOf = (n) => { const m = /\.([a-z0-9]+)$/i.exec(n); return m ? m[1].toLowerCase() : ""; };
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random()));
+const BOOK_EXTS = ["pdf","epub","docx","mobi","azw","azw3","prc","fb2","txt","md","markdown","html","htm","xhtml"];
+const COMIC_EXTS = ["cbz","cbr","zip","rar"];   // archives of page images (read via OCR)
+const ALL_EXTS = BOOK_EXTS.concat(COMIC_EXTS);
+const isComicExt = (e) => COMIC_EXTS.includes(e);
+const isPagedExt = (e) => e==="pdf" || isComicExt(e); // shown as page images with a highlight box
+
+/* ---------- in-page dialogs (WebView does not reliably show alert/confirm/prompt) ---------- */
+let _dlgResolve=null;
+function dlgClose(val){ $("#dlg").hidden=true; const r=_dlgResolve; _dlgResolve=null; if(r) r(val); }
+// opts: {title, msg, input:{value,placeholder}, choices:[{label,value,danger}], ok, cancel, hideOk}
+function dlg(opts){
+  if(_dlgResolve) dlgClose(null);
+  opts=opts||{};
+  $("#dlgTitle").textContent=opts.title||"";
+  $("#dlgMsg").textContent=opts.msg||"";
+  const inp=$("#dlgInput"); inp.hidden=!opts.input;
+  if(opts.input){ inp.value=opts.input.value||""; inp.placeholder=opts.input.placeholder||""; }
+  const ch=$("#dlgChoices"); ch.innerHTML="";
+  (opts.choices||[]).forEach(c=>{ const b=el("button", c.danger?"danger":""); b.textContent=c.label;
+    b.onclick=()=>dlgClose({choice:c.value}); ch.appendChild(b); });
+  $("#dlgOk").textContent=opts.ok||"OK"; $("#dlgOk").hidden=!!opts.hideOk;
+  $("#dlgCancel").textContent=opts.cancel||"Cancel"; $("#dlgCancel").hidden=opts.cancel===false;
+  $("#dlg").hidden=false;
+  if(opts.input) setTimeout(()=>{ inp.focus(); inp.select(); },50);
+  return new Promise(res=>{ _dlgResolve=res; });
+}
+$("#dlgOk").onclick=()=>{ const v=$("#dlgInput").hidden?{ok:true}:{ok:true,value:$("#dlgInput").value}; dlgClose(v); };
+$("#dlgCancel").onclick=()=>dlgClose(null);
+$("#dlgInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") $("#dlgOk").click(); });
+const dlgAlert=(title,msg)=>dlg({title,msg,cancel:false});
+const dlgConfirm=async(title,msg,ok,danger)=>!!(await dlg({title,msg,ok:ok||"OK"}));
+const dlgPrompt=async(title,value,ph)=>{ const r=await dlg({title,input:{value:value||"",placeholder:ph||""}}); return r?r.value:null; };
+const dlgChoose=async(title,choices)=>{ const r=await dlg({title,choices,hideOk:true}); return r?r.choice:null; };
+
+/* ---------- native bridge helpers (no-ops outside the Android wrapper) ---------- */
+const Native = {
+  has: typeof AndroidBridge!=="undefined",
+  keepOn(on){ try{ if(this.has) AndroidBridge.setKeepScreenOn(!!on); }catch(e){} },
+  // Saves a Blob. Android: chunked base64 into Downloads/LoudReader (large single bridge
+  // calls fail inside the bridge itself). Browser: normal download.
+  async saveBlob(name, mime, blob){
+    if(!this.has){
+      const a=el("a"); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click();
+      setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },2000); return {ok:true, uri:null};
+    }
+    if(!AndroidBridge.beginSave(name, mime)) return {ok:false};
+    const CH=3*65536; // multiple of 3 => every chunk is independently valid base64
+    for(let off=0; off<blob.size; off+=CH){
+      const b64=await new Promise((res,rej)=>{ const fr=new FileReader();
+        fr.onload=()=>res(String(fr.result).split(",")[1]||""); fr.onerror=()=>rej(fr.error);
+        fr.readAsDataURL(blob.slice(off, Math.min(blob.size, off+CH))); });
+      if(!AndroidBridge.appendChunk(b64)){ try{ AndroidBridge.abortSave(); }catch(e){} return {ok:false}; }
+    }
+    const uri=AndroidBridge.finishSave();
+    return uri ? {ok:true, uri} : {ok:false};
+  },
+  open(uri, mime){ try{ return this.has && AndroidBridge.openUri(uri, mime); }catch(e){ return false; } }
+};
+async function saveAndReport(name, mime, blob){
+  let r; try{ r=await Native.saveBlob(name, mime, blob); }catch(e){ r={ok:false}; }
+  if(!r.ok){ await dlgAlert("Save failed","The file could not be saved."); return; }
+  if(r.uri){
+    setStatus("Saved to Downloads/LoudReader/"+name);
+    if(await dlgConfirm("Saved","Saved to Downloads/LoudReader/"+name+"\n\nOpen it now?","Open")) Native.open(r.uri, mime);
+  } else setStatus("Downloaded "+name);
+}
+
+/* ---------- IndexedDB: docs (heavy) + meta (light) ---------- */
+const DB = (() => {
+  let dbp;
+  function open(){
+    if (dbp) return dbp;
+    dbp = new Promise((res, rej) => {
+      const r = indexedDB.open("loud-reader", 3);
+      r.onupgradeneeded = () => {
+        const db = r.result;
+        if (!db.objectStoreNames.contains("docs")) db.createObjectStore("docs", { keyPath:"id" });
+        if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath:"id" });
+        if (!db.objectStoreNames.contains("annotations")){
+          const store = db.createObjectStore("annotations", { keyPath:"id" });
+          store.createIndex("byDoc", "docId", { unique:false });
+        }
+      };
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+    return dbp;
+  }
+  const run = async (store, mode, fn) => {
+    const db = await open();
+    return new Promise((res, rej) => { const rq = fn(db.transaction(store, mode).objectStore(store)); rq.onsuccess=()=>res(rq.result); rq.onerror=()=>rej(rq.error); });
+  };
+  return {
+    putDoc:(d)=>run("docs","readwrite",s=>s.put(d)), getDoc:(id)=>run("docs","readonly",s=>s.get(id)),
+    allDocs:()=>run("docs","readonly",s=>s.getAll()), delDoc:(id)=>run("docs","readwrite",s=>s.delete(id)),
+    getMeta:(id)=>run("meta","readonly",s=>s.get(id)), allMeta:()=>run("meta","readonly",s=>s.getAll()),
+    delMeta:(id)=>run("meta","readwrite",s=>s.delete(id)),
+    async setMeta(id,patch){ const cur=(await this.getMeta(id))||{id}; Object.assign(cur,patch,{id}); return run("meta","readwrite",s=>s.put(cur)); },
+    putAnnotation:(a)=>run("annotations","readwrite",s=>s.put(a)),
+    delAnnotation:(id)=>run("annotations","readwrite",s=>s.delete(id)),
+    async annotationsForDoc(docId){
+      const db = await open();
+      return new Promise((res,rej)=>{
+        const idx = db.transaction("annotations","readonly").objectStore("annotations").index("byDoc");
+        const rq = idx.getAll(docId);
+        rq.onsuccess=()=>res(rq.result); rq.onerror=()=>rej(rq.error);
+      });
+    },
+    async delAnnotationsForDoc(docId){
+      const items = await this.annotationsForDoc(docId);
+      return Promise.all(items.map(a=>this.delAnnotation(a.id)));
+    },
+  };
+})();
+
+/* ---------- theme ---------- */
+const Theme = {
+  SETTINGS_ID:"__settings__", // reserved id in the "meta" store -- never collides with a document id (those are UUIDs/timestamps)
+  current:"dark",
+  async init(){
+    let saved=null;
+    try{ const m=await DB.getMeta(this.SETTINGS_ID); saved=m&&m.theme; }catch(e){}
+    const theme = (saved==="light"||saved==="dark") ? saved
+      : (window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+    this.apply(theme);
+  },
+  apply(theme){
+    this.current=theme;
+    document.documentElement.setAttribute("data-theme", theme);
+    const btn=$("#themeBtn"); if(!btn) return;
+    btn.innerHTML = theme==="light"
+      ? '<svg viewBox="0 0 24 24"><path d="M12 4V2m0 20v-2M4 12H2m20 0h-2M5.6 5.6 4.2 4.2m15.6 15.6-1.4-1.4M5.6 18.4 4.2 19.8M19.8 4.2l-1.4 1.4M12 7a5 5 0 100 10 5 5 0 000-10z"/></svg> Switch to dark mode'
+      : '<svg viewBox="0 0 24 24"><path d="M20.7 15.3A8.5 8.5 0 119 3.3a7 7 0 0011.7 12z"/></svg> Switch to light mode';
+    btn.title = theme==="light" ? "Switch to dark mode" : "Switch to light mode";
+  },
+  async toggle(){
+    const next = this.current==="light" ? "dark" : "light";
+    this.apply(next);
+    try{ await DB.setMeta(this.SETTINGS_ID,{theme:next}); }catch(e){}
+  }
+};
+$("#themeBtn").onclick=()=>{ Theme.toggle(); closeMoreMenu(); };
+Theme.init();
+async function parsePDF(blob, onProgress, ctx){
+  const pdf = await pdfjsLib.getDocument({ data: await blob.arrayBuffer() }).promise;
+  if (ctx) ctx.pages = pdf.numPages;
+  const rawLines = []; // one entry per visually-distinct line: {page, y, pageHeight, pageWidth, fontSize, items:[{str,x,y,w,h}]}
+  for (let p=1;p<=pdf.numPages;p++){
+    const page = await pdf.getPage(p); const content = await page.getTextContent();
+    const vp = page.getViewport({scale:1});
+    const pageHeight = vp.height || 792, pageWidth = vp.width || 612;
+    let lineItems=[], lastY=null, lineSizes=[];
+    const flush=(atY)=>{
+      if(lineItems.length){
+        const fs = lineSizes.length ? (lineSizes.reduce((a,b)=>a+b,0)/lineSizes.length) : 0;
+        rawLines.push({ page:p, y:(atY==null?lastY:atY), pageHeight, pageWidth, fontSize:fs, items:lineItems });
+        lineItems=[]; lineSizes=[];
+      }
+    };
+    for (const it of content.items){
+      const y=it.transform[5];
+      if(lastY!==null && Math.abs(y-lastY)>4) flush(lastY);
+      const x=it.transform[4];
+      const h=Math.abs(it.transform[3])||0;
+      const w=(it.width!=null && it.width>0) ? it.width : (Math.abs(it.transform[0])*(it.str||"").length*0.5);
+      lineItems.push({str:it.str, x, y, w, h});
+      lineSizes.push(h);
+      if(it.hasEOL) flush(y);
+      lastY=y;
+    }
+    flush(lastY);
+    onProgress && onProgress(p/pdf.numPages);
+  }
+  return classifyPdfLines(rawLines);
+}
+
+/* Splits a line's pdf.js text items into word-level {str,x,y,w,h} records.
+   Each item's own width is distributed across its characters proportionally
+   (a reasonable approximation without a full text-shaping engine) when the
+   item contains internal whitespace. Adjacent items with no real gap between
+   them (common for kerned runs) are merged into a single word rather than
+   split, using a gap threshold relative to line height. */
+function lineItemsToWords(items, pageHeight){
+  const words=[]; let pending=null;
+  const GAP_FRAC=0.25;
+  for (const it of items){
+    const pieces = (it.str||"").split(/(\s+)/);
+    let cx=it.x; const totalChars=(it.str||"").length || 1;
+    for (const piece of pieces){
+      if (piece==="") continue;
+      const pw = it.w * (piece.length/totalChars);
+      if (/^\s+$/.test(piece)){
+        if (pending){ words.push(pending); pending=null; }
+        cx += pw; continue;
+      }
+      const wordX=cx; cx += pw;
+      if (pending){
+        const gap = wordX - (pending.x+pending.w);
+        if (gap > (it.h||8)*GAP_FRAC){ words.push(pending); pending={str:piece, x:wordX, baselineY:it.y, w:pw, h:it.h}; }
+        else { pending.str += piece; pending.w = (wordX+pw) - pending.x; }
+      } else {
+        pending = {str:piece, x:wordX, baselineY:it.y, w:pw, h:it.h};
+      }
+    }
+  }
+  if (pending) words.push(pending);
+  // PDF space has Y=0 at the page bottom, growing up, with `y` recorded as
+  // the text baseline. Convert to Y=0 at the page top growing down (the
+  // canvas/CSS convention) using a rough ascent/descent split, since exact
+  // glyph metrics aren't available here -- fine for a highlight box, which
+  // doesn't need pixel-perfect alignment.
+  return mergeStandaloneDevanagariMarks(words.map(w=>({
+    str:w.str, x:w.x, w:w.w,
+    y: pageHeight - (w.baselineY + w.h*0.8),
+    h: w.h
+  })));
+}
+
+/* Heuristic header/footer/footnote detection for PDFs.
+   Basis: text in the top/bottom ~8% margin band of a page that either (a) repeats
+   near-verbatim on 2+ pages (running header/footer/title), or (b) is a short
+   page-number-shaped line, is treated as header/footer. Bottom-margin text that
+   doesn't match either pattern but is set noticeably smaller than the document's
+   median body font size is treated as a footnote. Everything else -- including
+   ordinary paragraphs that merely happen to start/end near a margin -- is left
+   as body text; this deliberately favors under-triggering over accidentally
+   silencing real content. Genuinely a heuristic: expect occasional misses on
+   unusual layouts, not perfect extraction. */
+function classifyPdfLines(rawLines){
+  const TOP_FRAC=0.08, BOT_FRAC=0.08, GAP_SPLIT=20;
+  const lineText = l => l.items.map(i=>i.str).join("").replace(/\s+/g," ").trim();
+  const pages=[...new Set(rawLines.map(l=>l.page))].sort((a,b)=>a-b);
+  const byPage={};
+  rawLines.forEach(l=>{
+    const frac = 1 - (l.y / (l.pageHeight||792)); // ~0 near top edge, ~1 near bottom edge
+    let zone="body";
+    if (frac<=TOP_FRAC) zone="top"; else if (frac>=1-BOT_FRAC) zone="bottom";
+    (byPage[l.page] || (byPage[l.page]={top:[],body:[],bottom:[]}))[zone].push(l);
+  });
+
+  // Detects a vertical whitespace gutter in the body band's text items,
+  // analogous to the pixel-based detector used for scanned pages, but
+  // working on item X-coverage instead of rendered pixel density (text
+  // items are sparse, so a coarser bucket resolution is enough). Needed
+  // because pdf.js returns text items in whatever order the PDF's content
+  // stream defines -- usually column-by-column for typeset documents, but
+  // not guaranteed, and some producers emit roughly row-by-row across the
+  // full page width, which interleaves both columns' text.
+  function detectTextColumnGutter(lines, pageWidth){
+    if (!pageWidth) return null;
+    const BUCKETS=200;
+    const occ=new Float32Array(BUCKETS);
+    lines.forEach(l=>l.items.forEach(it=>{
+      const b0=Math.max(0,Math.floor(it.x/pageWidth*BUCKETS));
+      const b1=Math.min(BUCKETS-1,Math.ceil((it.x+it.w)/pageWidth*BUCKETS));
+      for (let b=b0;b<=b1;b++) occ[b]=1;
+    }));
+    const searchStart=Math.floor(BUCKETS*0.35), searchEnd=Math.floor(BUCKETS*0.65);
+    let bestStart=-1,bestEnd=-1,bestLen=0,curStart=-1;
+    for (let b=searchStart;b<=searchEnd;b++){
+      if (occ[b]===0){ if(curStart===-1) curStart=b; }
+      else { if(curStart!==-1){ const len=b-curStart; if(len>bestLen){bestLen=len;bestStart=curStart;bestEnd=b;} curStart=-1; } }
+    }
+    if (curStart!==-1){ const len=searchEnd-curStart; if(len>bestLen){bestLen=len;bestStart=curStart;bestEnd=searchEnd;} }
+    const MIN_LEN=Math.max(3,Math.floor(BUCKETS*0.015)), MAX_LEN=Math.floor((searchEnd-searchStart)*0.7);
+    if (bestLen<MIN_LEN || bestLen>MAX_LEN) return null;
+    let leftOcc=0,rightOcc=0;
+    for (let b=Math.max(0,bestStart-15); b<bestStart; b++) leftOcc+=occ[b];
+    for (let b=bestEnd; b<Math.min(BUCKETS,bestEnd+15); b++) rightOcc+=occ[b];
+    if (leftOcc<3 || rightOcc<3) return null; // require real content on both sides, not just a sparse/blank page
+    return ((bestStart+bestEnd)/2)/BUCKETS*pageWidth;
+  }
+
+  Object.keys(byPage).forEach(pnum=>{
+    const bodyLines=byPage[pnum].body;
+    if (bodyLines.length<4) return; // too little content to reliably judge column layout
+    const pageWidth=bodyLines[0].pageWidth;
+    const gutterX=detectTextColumnGutter(bodyLines, pageWidth);
+    if (gutterX==null) return;
+    const left=[], right=[];
+    bodyLines.forEach(l=>{
+      let leftW=0, rightW=0;
+      l.items.forEach(it=>{ if ((it.x+it.w/2)<gutterX) leftW+=it.w; else rightW+=it.w; });
+      (leftW>=rightW ? left : right).push(l);
+    });
+    left.sort((a,b)=>b.y-a.y); right.sort((a,b)=>b.y-a.y);
+    byPage[pnum].body = left.concat(right);
+  });
+
+  function clusterBand(lines){
+    const sorted=[...lines].sort((a,b)=>b.y-a.y); // top-to-bottom reading order
+    const groups=[]; let cur=null;
+    sorted.forEach(l=>{
+      if(cur && Math.abs(cur.lastY-l.y)<=GAP_SPLIT){ cur.lines.push(l); cur.lastY=l.y; }
+      else { cur={lines:[l], lastY:l.y}; groups.push(cur); }
+    });
+    return groups.map(g=>({
+      text: g.lines.map(lineText).join(" ").replace(/\s+/g," ").trim(),
+      words: g.lines.reduce((acc,l)=>acc.concat(lineItemsToWords(l.items, l.pageHeight)), []),
+      fontSize: g.lines.reduce((a,x)=>a+x.fontSize,0)/g.lines.length,
+      page: g.lines[0].page
+    }));
+  }
+
+  const topGroups=[], botGroups=[];
+  Object.keys(byPage).forEach(pnum=>{
+    clusterBand(byPage[pnum].top).forEach(g=>topGroups.push(g));
+    clusterBand(byPage[pnum].bottom).forEach(g=>botGroups.push(g));
+  });
+
+  const norm = s => s.toLowerCase().replace(/\d+/g,"#").replace(/[^\p{L}\p{N}# ]+/gu," ").replace(/\s+/g," ").trim();
+  const pageNumPattern = /^[\W]*(page\s*)?#+(\s*(of|\/)\s*#+)?[\W]*$/i;
+  function repeatMapFor(groups){
+    const m={};
+    groups.forEach(g=>{ const k=norm(g.text); if(!m[k]) m[k]=new Set(); m[k].add(g.page); });
+    return m;
+  }
+  const topRepeat=repeatMapFor(topGroups), botRepeat=repeatMapFor(botGroups);
+
+  const bodyFS = rawLines.filter(l=>{
+    const frac=1-(l.y/(l.pageHeight||792));
+    return frac>TOP_FRAC && frac<1-BOT_FRAC;
+  }).map(l=>l.fontSize).filter(f=>f>0).sort((a,b)=>a-b);
+  const medianFS = bodyFS.length ? bodyFS[Math.floor(bodyFS.length/2)] : 0;
+
+  function classify(g, repeatMap, isBottom){
+    if(!g.text) return "body";
+    const k=norm(g.text);
+    const repeated = repeatMap[k] && repeatMap[k].size>=2;
+    const looksLikePageNum = g.text.split(/\s+/).length<=8 && pageNumPattern.test(norm(g.text));
+    if (repeated || looksLikePageNum) return isBottom?"footer":"header";
+    if (isBottom && medianFS>0 && g.fontSize>0 && g.fontSize < medianFS*0.85) return "footnote";
+    return "body";
+  }
+
+  const byPageOut={};
+  topGroups.forEach(g=>{ const o=(byPageOut[g.page] || (byPageOut[g.page]={top:[],bottom:[]})); if(g.text) o.top.push({text:g.text, words:g.words, role:classify(g,topRepeat,false), page:g.page, pageWidth:g.pageWidth, pageHeight:g.pageHeight}); });
+  botGroups.forEach(g=>{ const o=(byPageOut[g.page] || (byPageOut[g.page]={top:[],bottom:[]})); if(g.text) o.bottom.push({text:g.text, words:g.words, role:classify(g,botRepeat,true), page:g.page, pageWidth:g.pageWidth, pageHeight:g.pageHeight}); });
+
+  const out=[];
+  pages.forEach(p=>{
+    const bp=byPageOut[p]||{top:[],bottom:[]};
+    bp.top.forEach(b=>out.push(b));
+    const bodyLines=byPage[p]?byPage[p].body:[];
+    const bodyText=bodyLines.map(lineText).join(" ").replace(/\s+/g," ").trim();
+    const bodyWords=bodyLines.reduce((acc,l)=>acc.concat(lineItemsToWords(l.items, l.pageHeight)), []);
+    if (bodyText) out.push({text:bodyText, words:bodyWords, role:"body", page:p});
+    bp.bottom.forEach(b=>out.push(b));
+  });
+  return out;
+}
+async function parseDOCX(blob){ const res = await mammoth.convertToHtml({ arrayBuffer: await blob.arrayBuffer() }); return htmlToBlocks(res.value, {docx:true}); }
+async function parseEPUB(blob){
+  const zip = await JSZip.loadAsync(blob);
+  const opfPath = new DOMParser().parseFromString(await zip.file("META-INF/container.xml").async("string"),"application/xml").querySelector("rootfile").getAttribute("full-path");
+  const baseDir = opfPath.includes("/") ? opfPath.slice(0,opfPath.lastIndexOf("/")+1) : "";
+  const opf = new DOMParser().parseFromString(await zip.file(opfPath).async("string"),"application/xml");
+  const manifest={}; opf.querySelectorAll("manifest > item").forEach(i=>manifest[i.getAttribute("id")]=i.getAttribute("href"));
+  const spine=[...opf.querySelectorAll("spine > itemref")].map(i=>i.getAttribute("idref"));
+  const blocks=[];
+  for (const idref of spine){
+    const href=manifest[idref]; if(!href) continue;
+    const path=decodeURIComponent(baseDir+href).replace(/\\/g,"/");
+    const f=zip.file(path)||zip.file(path.replace(/^\.?\//,"")); if(!f) continue;
+    for (const b of htmlToBlocks(await f.async("string"), {epub:true})) blocks.push(b);
+  }
+  return blocks;
+}
+/* role tagging: "body" is read aloud, anything else is shown (dimmed) but skipped.
+   - DOCX: mammoth never includes header1.xml/footer1.xml content in convertToHtml's
+     output, so running headers/footers are already absent -- nothing to strip there.
+     Footnotes/endnotes DO come through: an inline superscript reference marker plus
+     a list item near the end of the body, both carrying ids like "footnote-3" by
+     mammoth's own convention. Both are tagged/stripped here.
+   - EPUB: reflowable text has no page concept in this app, so headers/footers
+     structurally don't apply. Footnotes are detected via the EPUB3/ARIA semantic
+     markers (epub:type="noteref"/"footnote", role="doc-noteref"/"doc-footnote")
+     where publishers use them -- this is best-effort, since plenty of EPUBs mark
+     footnotes with nothing more than an arbitrary class name or none at all. */
+function htmlToBlocks(html, opts){
+  opts = opts || {};
+  const doc = (typeof html==="string") ? new DOMParser().parseFromString(html,"text/html") : html; // string or an already-parsed Document (MOBI sections)
+  doc.querySelectorAll("script,style,head").forEach(n=>n.remove());
+
+  // Strip inline footnote/endnote reference markers so a bare "1" isn't read
+  // aloud mid-sentence. Uses only plain attribute selectors (no CSS namespace
+  // escaping) for reliability.
+  doc.querySelectorAll('sup a[id^="footnote-ref-"], sup a[id^="endnote-ref-"], a[role="doc-noteref"]').forEach(a=>{
+    const sup=a.closest("sup"); (sup||a).remove();
+  });
+  if (opts.epub){
+    doc.querySelectorAll("a").forEach(a=>{
+      const et=a.getAttribute("epub:type")||"";
+      if(/noteref/i.test(et)){ const sup=a.closest("sup"); (sup||a).remove(); }
+    });
+  }
+
+  function isFootnoteNode(n){
+    if (opts.docx){
+      let a=n;
+      while(a){ if(a.id && /^(footnote|endnote)-/i.test(a.id)) return true; a=a.parentElement; }
+    }
+    if (opts.epub){
+      let a=n;
+      while(a){
+        const et=(a.getAttribute && (a.getAttribute("epub:type")||a.getAttribute("role")))||"";
+        if (/footnote/i.test(et)) return true;
+        a=a.parentElement;
+      }
+    }
+    return false;
+  }
+
+  const blocks=[]; const nodes = doc.body ? doc.body.querySelectorAll("p,h1,h2,h3,h4,h5,h6,li,blockquote,td,pre") : [];
+  if (nodes.length) nodes.forEach(n=>{
+    const t=(n.textContent||"").replace(/\s+/g," ").trim(); if(!t) return;
+    blocks.push({ text:t, role: isFootnoteNode(n) ? "footnote" : "body" });
+  });
+  else { const t=(doc.body?doc.body.textContent:"").replace(/\s+/g," ").trim(); if(t) blocks.push({text:t, role:"body"}); }
+  return blocks;
+}
+/* ---------- v2 formats: TXT / Markdown / FB2 / HTML / MOBI / comics ---------- */
+function decodeBytes(buf, hint){
+  const u8=new Uint8Array(buf);
+  if(u8[0]===0xEF&&u8[1]===0xBB&&u8[2]===0xBF) return new TextDecoder("utf-8").decode(u8.subarray(3));
+  if(u8[0]===0xFF&&u8[1]===0xFE) return new TextDecoder("utf-16le").decode(u8.subarray(2));
+  if(u8[0]===0xFE&&u8[1]===0xFF) return new TextDecoder("utf-16be").decode(u8.subarray(2));
+  if(hint){ try{ return new TextDecoder(hint).decode(u8); }catch(e){} }
+  try{ return new TextDecoder("utf-8",{fatal:true}).decode(u8); }
+  catch(e){ return new TextDecoder("windows-1252").decode(u8); }
+}
+// Light Markdown -> plain-text blocks: drops syntax characters so they aren't read aloud.
+function markdownToBlocks(text){
+  const blocks=[]; let para=[]; let inFence=false;
+  const flush=()=>{ const t=para.join(" ").replace(/\s+/g," ").trim(); if(t) blocks.push({text:t,role:"body"}); para=[]; };
+  const inline=(l)=>l
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g,"$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g,"$1")
+    .replace(/\[([^\]]+)\]\[[^\]]*\]/g,"$1")
+    .replace(/<(https?:[^>]+)>/g,"$1")
+    .replace(/<\/?[a-zA-Z][^>]*>/g,"")
+    .replace(/`+([^`]*)`+/g,"$1")
+    .replace(/(\*\*|__)(.+?)\1/g,"$2")
+    .replace(/(^|[\s(])(\*|_)(?=\S)(.+?)(?<=\S)\2(?=$|[\s).,;:!?])/g,"$1$3")
+    .replace(/~~(.+?)~~/g,"$1");
+  for(const raw of text.replace(/\r\n?/g,"\n").split("\n")){
+    if(/^\s*(```|~~~)/.test(raw)){ flush(); inFence=!inFence; continue; }
+    if(inFence){ const t=raw.trim(); if(t) blocks.push({text:t,role:"body"}); continue; }
+    let l=raw.trim();
+    if(!l){ flush(); continue; }
+    if(/^([-*_]\s*){3,}$/.test(l)||/^(=+|-+)$/.test(l)) { flush(); continue; }   // rules / setext underlines
+    if(/^\[[^\]]+\]:\s*\S+/.test(l)) continue;                                      // reference link definitions
+    if(/^\|?[\s:|-]+\|?$/.test(l) && l.includes("-")) continue;                      // table separator rows
+    const heading=/^#{1,6}\s+/.test(l);
+    l=l.replace(/^#{1,6}\s+/,"").replace(/\s+#+\s*$/,"").replace(/^(>\s*)+/,"");
+    const item=/^([-*+]|\d+[.)])\s+/.test(l);
+    l=l.replace(/^([-*+]|\d+[.)])\s+/,"").replace(/^\[[ xX]\]\s+/,"");
+    if(l.startsWith("|")||l.includes(" | ")) l=l.replace(/\|/g," ");
+    l=inline(l);
+    if(heading||item){ flush(); const t=l.replace(/\s+/g," ").trim(); if(t) blocks.push({text:t,role:"body"}); }
+    else para.push(l);
+  }
+  flush(); return blocks;
+}
+function plainTextToBlocks(text){
+  text=text.replace(/\r\n?/g,"\n");
+  let parts=text.split(/\n[ \t]*\n+/).map(x=>x.replace(/\s+/g," ").trim()).filter(Boolean);
+  if(parts.length<=1 && text.split("\n").filter(l=>l.trim()).length>3)   // no blank lines at all: one block per line
+    parts=text.split("\n").map(x=>x.trim()).filter(Boolean);
+  return parts.map(t=>({text:t,role:"body"}));
+}
+async function parseTextFile(blob, ext){
+  const text=decodeBytes(await blob.arrayBuffer());
+  return (ext==="md"||ext==="markdown") ? markdownToBlocks(text) : plainTextToBlocks(text);
+}
+async function parseHTMLFile(blob){ return htmlToBlocks(decodeBytes(await blob.arrayBuffer()), {}); }
+async function parseFB2(blob){
+  const buf=await blob.arrayBuffer();
+  const head=new TextDecoder("latin1").decode(new Uint8Array(buf,0,Math.min(300,buf.byteLength)));
+  const m=/encoding=["']([\w-]+)["']/i.exec(head);
+  const d=new DOMParser().parseFromString(decodeBytes(buf, m&&m[1]),"application/xml");
+  if(d.getElementsByTagName("parsererror").length) throw new Error("This FB2 file is not valid XML.");
+  [...d.getElementsByTagName("a")].forEach(a=>{ if(a.getAttribute("type")==="note") a.remove(); }); // inline note markers
+  const blocks=[];
+  [...d.getElementsByTagName("body")].forEach(body=>{
+    const notes=(body.getAttribute("name")||"")==="notes";
+    body.querySelectorAll("p,v").forEach(n=>{
+      const t=(n.textContent||"").replace(/\s+/g," ").trim(); if(t) blocks.push({text:t, role:notes?"footnote":"body"});
+    });
+  });
+  return blocks;
+}
+async function parseMOBI(blob){
+  const mod=await ensureMobi();
+  const unzlib=async(u8)=>{ const ds=new DecompressionStream("deflate"); const w=ds.writable.getWriter(); w.write(u8); w.close();
+    return new Uint8Array(await new Response(ds.readable).arrayBuffer()); };
+  const mobi=new mod.MOBI({unzlib}); let book;
+  try{ book=await mobi.open(blob); }
+  catch(e){ throw new Error("Could not read this MOBI/AZW file ("+(e&&e.message||e)+")."); }
+  if(mobi.headers && mobi.headers.palmdoc && mobi.headers.palmdoc.encryption>0)
+    throw new Error("This book is DRM-protected and cannot be read.");
+  const blocks=[];
+  for(const sec of (book.sections||[])){
+    let d; try{ d=await sec.createDocument(); }catch(e){ continue; }
+    for(const b of htmlToBlocks(d,{})) blocks.push(b);
+  }
+  return blocks;
+}
+
+/* Comics / image archives (CBZ, CBR, ZIP, RAR). Pages are shown as images; reading aloud needs OCR. */
+const IMG_RE=/\.(jpe?g|png|gif|webp|bmp|avif)$/i;
+const naturalCmp=(a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:"base"});
+const comicCache={id:null, entries:null};
+const imgMime=(n)=>{ const e=extOf(n); return e==="jpg"?"image/jpeg":"image/"+e; };
+async function loadComicEntries(doc, onProgress){
+  if(comicCache.id===doc.id && comicCache.entries) return comicCache.entries;
+  const head=new Uint8Array(await doc.blob.slice(0,8).arrayBuffer());
+  const isRar=head[0]===0x52&&head[1]===0x61&&head[2]===0x72&&head[3]===0x21; // "Rar!"
+  let entries=[];
+  if(isRar){
+    const U=await ensureUnrar();
+    const data=new Uint8Array(await doc.blob.arrayBuffer());
+    const wasm=b64bytes("unrar-wasm");
+    const ex=await U.createExtractorFromData({wasmBinary: wasm.buffer, data});
+    const names=[...ex.getFileList().fileHeaders].filter(h=>!h.flags.directory && IMG_RE.test(h.name) && !/(^|\/)(__MACOSX|\._)/.test(h.name)).map(h=>h.name).sort(naturalCmp);
+    const byName=new Map(); let n=0;
+    for(const f of ex.extract({files:names}).files){
+      // the bundled unrar build yields the bytes directly as `extraction`; newer builds wrap them as `extraction.data`
+      const bytes=f.extraction && (f.extraction.data || (f.extraction instanceof Uint8Array ? f.extraction : null));
+      if(bytes) byName.set(f.fileHeader.name, new Blob([bytes],{type:imgMime(f.fileHeader.name)}));
+      if(onProgress) onProgress(++n/Math.max(1,names.length));
+    }
+    entries=names.filter(nm=>byName.has(nm)).map(nm=>({name:nm, getBlob:()=>Promise.resolve(byName.get(nm))}));
+  } else {
+    const zip=await JSZip.loadAsync(doc.blob);
+    const files=[]; zip.forEach((path,f)=>{ if(!f.dir && IMG_RE.test(path) && !/(^|\/)(__MACOSX|\._)/.test(path)) files.push(f); });
+    files.sort((a,b)=>naturalCmp(a.name,b.name));
+    entries=files.map(f=>({name:f.name, getBlob:()=>f.async("blob").then(b=>b.type?b:new Blob([b],{type:imgMime(f.name)}))}));
+  }
+  if(!entries.length) throw new Error("No page images were found in this archive.");
+  comicCache.id=doc.id; comicCache.entries=entries;
+  return entries;
+}
+// Presents image pages through the small subset of the pdf.js page API that the reader and OCR use.
+async function openImageBook(doc, onProgress){
+  const entries=await loadComicEntries(doc, onProgress);
+  const cache=new Map();
+  const bmp=async(n)=>{
+    if(cache.has(n)) return cache.get(n);
+    const b=await createImageBitmap(await entries[n-1].getBlob());
+    cache.set(n,b);
+    if(cache.size>6){ const k=cache.keys().next().value; try{ cache.get(k).close(); }catch(e){} cache.delete(k); }
+    return b;
+  };
+  return {
+    numPages:entries.length, lazyDims:true,
+    async getPage(n){
+      const b=await bmp(n);
+      return {
+        getViewport:({scale})=>({width:b.width*scale, height:b.height*scale}),
+        render:({canvasContext,viewport})=>({promise:Promise.resolve().then(()=>{ canvasContext.drawImage(b,0,0,viewport.width,viewport.height); })})
+      };
+    },
+    destroy(){ cache.forEach(b=>{ try{ b.close(); }catch(e){} }); cache.clear(); }
+  };
+}
+async function openPageSource(doc){
+  if(isComicExt(extOf(doc.name))) return openImageBook(doc);
+  return pdfjsLib.getDocument({ data: await doc.blob.arrayBuffer() }).promise;
+}
+async function parseComic(doc, onProgress, ctx){
+  const entries=await loadComicEntries(doc, onProgress);
+  if(ctx){ ctx.pages=entries.length; ctx.comic=true; }
+  return []; // no text until OCR is run
+}
+
+async function parseDoc(doc, onProgress, ctx){
+  const ext = extOf(doc.name);
+  if (ext==="pdf") return parsePDF(doc.blob,onProgress,ctx);
+  if (ext==="docx") return parseDOCX(doc.blob);
+  if (ext==="epub") return parseEPUB(doc.blob);
+  if (["mobi","azw","azw3","prc"].includes(ext)) return parseMOBI(doc.blob);
+  if (ext==="fb2") return parseFB2(doc.blob);
+  if (["txt","md","markdown"].includes(ext)) return parseTextFile(doc.blob, ext);
+  if (["html","htm","xhtml"].includes(ext)) return parseHTMLFile(doc.blob);
+  if (isComicExt(ext)) return parseComic(doc, onProgress, ctx);
+  throw new Error("Unsupported file type: ."+ext);
+}
+
+/* ---------- OCR (fully embedded, self-contained worker — no network) ----------
+   Tesseract's worker normally fetches its WASM core (via importScripts) and the
+   language model (via fetch) from URLs. Here we prepend a shim to the worker that
+   intercepts both and serves them from base64 baked into the worker itself, so
+   nothing is ever requested over the network. */
+/* Detects a vertical whitespace gutter near the horizontal center of a
+   rendered page image, indicating a 2-column layout. Returns the gutter's
+   x-coordinate (px) to split on, or null for single-column (or anything
+   ambiguous -- deliberately conservative, since a wrong split is worse than
+   no split). Tesseract's own automatic column detection is not used for
+   ordering: it's known to sometimes read straight across both columns by
+   row instead of down one column then the other, which is exactly the
+   failure this works around. */
+// A word consisting entirely of Devanagari combining marks (matras, virama,
+// anusvara, visarga, candrabindu, and related vowel-sign variants) can never
+// legally stand alone -- these always attach to a preceding consonant/vowel.
+// If word-boundary detection (gap-based in the text-layer path, or
+// Tesseract's own segmentation in the OCR path) wrongly splits one off, it
+// ends up as its own entry in Reader.words[] -- and since the TTS utterance
+// is built by joining words with a space, that space gets spoken aloud as a
+// syllable break. This merges any such stray mark into the previous word,
+// extending its bounding box to cover both when position data is present.
+const DEVANAGARI_PURE_MARK = /^[\u0900-\u0903\u093A\u093C\u093E-\u094D\u0951-\u0957\u0962\u0963]+$/;
+function mergeStandaloneDevanagariMarks(words){
+  const out=[];
+  for (const w of words){
+    const str = (w.str!==undefined) ? w.str : w.text;
+    if (out.length && str && DEVANAGARI_PURE_MARK.test(str)){
+      const prev = out[out.length-1];
+      if (prev.str!==undefined) prev.str += str; else prev.text += str;
+      if (prev.x!=null && w.x!=null){
+        const left=Math.min(prev.x, w.x), right=Math.max(prev.x+prev.w, w.x+w.w);
+        const top=Math.min(prev.y, w.y), bot=Math.max(prev.y+prev.h, w.y+w.h);
+        prev.x=left; prev.w=right-left; prev.y=top; prev.h=bot-top;
+      }
+    } else {
+      out.push(Object.assign({}, w));
+    }
+  }
+  return out;
+}
+
+function detectColumnGutter(canvas){
+  try{
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    const yStart = Math.floor(h*0.12), yEnd = Math.floor(h*0.88); // skip likely header/footer bands
+    const bandH = Math.max(1, yEnd-yStart);
+    const img = ctx.getImageData(0, yStart, w, bandH).data;
+    const colDensity = new Float32Array(w);
+    const rowStep = Math.max(1, Math.floor(bandH/300)); // sample ~300 rows for speed
+    let sampledRows = 0;
+    for (let y=0; y<bandH; y+=rowStep){
+      sampledRows++;
+      const rowOff = y*w*4;
+      for (let x=0; x<w; x++){
+        const idx = rowOff + x*4;
+        const lum = (img[idx]+img[idx+1]+img[idx+2])/3;
+        if (lum < 180) colDensity[x] += 1; // count "ink" pixels per column
+      }
+    }
+    if (!sampledRows) return null;
+    for (let x=0;x<w;x++) colDensity[x] /= sampledRows;
+
+    // Look for the widest contiguous blank band within the middle third of the page.
+    const searchStart = Math.floor(w*0.35), searchEnd = Math.floor(w*0.65);
+    const DENSITY_THRESH = 0.01;
+    let bestStart=-1, bestEnd=-1, bestLen=0, curStart=-1;
+    for (let x=searchStart; x<=searchEnd; x++){
+      if (colDensity[x] < DENSITY_THRESH){ if(curStart===-1) curStart=x; }
+      else { if(curStart!==-1){ const len=x-curStart; if(len>bestLen){bestLen=len;bestStart=curStart;bestEnd=x;} curStart=-1; } }
+    }
+    if (curStart!==-1){ const len=searchEnd-curStart; if(len>bestLen){bestLen=len;bestStart=curStart;bestEnd=searchEnd;} }
+
+    const MIN_GUTTER_PX = Math.max(8, Math.floor(w*0.008));
+    const MAX_GUTTER_PX = Math.floor((searchEnd-searchStart)*0.6); // too wide = probably sparse/blank page, not a real gutter
+    if (bestLen < MIN_GUTTER_PX || bestLen > MAX_GUTTER_PX) return null;
+
+    // Require real ink density just outside both sides of the candidate gutter,
+    // confirming there's actually a column of text on each side (not just a
+    // stray gap on a sparsely-filled page).
+    const sideSample = 40, MIN_SIDE_DENSITY = 0.03;
+    let leftD=0, ln=0; for(let x=Math.max(0,bestStart-sideSample); x<bestStart; x++){ leftD+=colDensity[x]; ln++; }
+    let rightD=0, rn=0; for(let x=bestEnd; x<Math.min(w,bestEnd+sideSample); x++){ rightD+=colDensity[x]; rn++; }
+    leftD = ln?leftD/ln:0; rightD = rn?rightD/rn:0;
+    if (leftD<MIN_SIDE_DENSITY || rightD<MIN_SIDE_DENSITY) return null;
+
+    return Math.floor((bestStart+bestEnd)/2);
+  } catch(e){ return null; }
+}
+function cropCanvas(src, sx, sy, sw, sh){
+  const c = el("canvas"); c.width=sw; c.height=sh;
+  c.getContext("2d").drawImage(src, sx, sy, sw, sh, 0, 0, sw, sh);
+  return c;
+}
+
+const OCR_OUT = { text:true, blocks:true };
+const OCR = {
+  cancel:false, _workerURL:null, _langBytesEng:null, _langBytesHin:null,
+  _buildWorkerURL(){
+    if (this._workerURL) return this._workerURL;
+    const coreB64 = document.getElementById("tess-core").textContent.trim();
+    const langEngB64 = document.getElementById("tess-lang").textContent.trim();
+    const langHinB64 = document.getElementById("tess-lang-hin").textContent.trim();
+    const workerText = b64text("tess-worker");
+    const shim =
+      'var __CORE_B64="' + coreB64 + '";\n' +
+      'var __LANG_ENG_B64="' + langEngB64 + '";\n' +
+      'var __LANG_HIN_B64="' + langHinB64 + '";\n' +
+      '(function(){\n' +
+      'function _t(b){var s=atob(b),n=s.length,a=new Uint8Array(n);for(var i=0;i<n;i++)a[i]=s.charCodeAt(i);return new TextDecoder("utf-8").decode(a);}\n' +
+      'function _b(b){var s=atob(b),n=s.length,a=new Uint8Array(n);for(var i=0;i<n;i++)a[i]=s.charCodeAt(i);return a;}\n' +
+      'var _imp=self.importScripts.bind(self);\n' +
+      'self.importScripts=function(){for(var i=0;i<arguments.length;i++){if(typeof arguments[i]==="string"&&/tesseract-core/.test(arguments[i])){(0,eval)(_t(__CORE_B64));return;}}return _imp.apply(self,arguments);};\n' +
+      'var _f=self.fetch?self.fetch.bind(self):null;\n' +
+      'self.fetch=function(u,o){try{var s=(typeof u==="string")?u:(u&&u.url);' +
+      'if(s&&/hin\\.traineddata/.test(s)){return Promise.resolve(new Response(_b(__LANG_HIN_B64),{status:200,headers:{"Content-Type":"application/octet-stream"}}));}' +
+      'if(s&&/eng\\.traineddata/.test(s)){return Promise.resolve(new Response(_b(__LANG_ENG_B64),{status:200,headers:{"Content-Type":"application/octet-stream"}}));}' +
+      '}catch(e){}return _f?_f(u,o):Promise.reject(new Error("network disabled"));};\n' +
+      '})();\n';
+    this._workerURL = blobURL(shim + workerText);
+    return this._workerURL;
+  },
+  async run(doc, onProgress, langOrder){
+    this.cancel = false;
+    if (!this._langBytesEng) this._langBytesEng = b64bytes("tess-lang");
+    if (!this._langBytesHin) this._langBytesHin = b64bytes("tess-lang-hin");
+    const langBytesEng = this._langBytesEng, langBytesHin = this._langBytesHin;
+
+    // Also cover the case where the language model is requested from the main thread.
+    // Routes by matching the language code in the filename -- NOT a blind single-blob
+    // return -- since eng+hin loads two separate trained-data files.
+    const origFetch = self.fetch ? self.fetch.bind(self) : null;
+    self.fetch = function(u, o){
+      try{
+        const s=(typeof u==="string")?u:(u&&u.url);
+        if(s && /hin\.traineddata/.test(s)) return Promise.resolve(new Response(langBytesHin,{status:200}));
+        if(s && /eng\.traineddata/.test(s)) return Promise.resolve(new Response(langBytesEng,{status:200}));
+      }catch(e){}
+      return origFetch ? origFetch(u,o) : Promise.reject(new Error("network disabled"));
+    };
+
+    let worker, pdfSrcRef=null;
+    try{
+      const pdf = await openPageSource(doc); pdfSrcRef=pdf;
+      const comic = isComicExt(extOf(doc.name));
+      worker = await Tesseract.createWorker(langOrder||"hin+eng", 1, {
+        workerPath: this._buildWorkerURL(), workerBlobURL:false,
+        corePath:"core", langPath:"lang", gzip:true,
+        logger:(m)=>{ if(m.status==="recognizing text") onProgress && onProgress({ frac:m.progress }); }
+      });
+      // Devanagari-specific tuning recommended by the hin.traineddata file itself
+      // (visible as embedded config text) but not applied by default. Most
+      // importantly: pageseg_devanagari_split_strategy splits the shirorekha
+      // (the connecting head-stroke across Devanagari letters) before
+      // recognition -- without it, conjunct clusters are a well-documented
+      // source of garbled Hindi output. tessedit_char_blacklist(1) is
+      // deliberately NOT set here, unlike the file's own Hindi-only
+      // recommendation -- this worker does combined eng+hin recognition, and
+      // blacklisting "1" would break English/numeral recognition in mixed
+      // documents (page numbers, amounts, dates).
+      try{
+        await worker.setParameters({
+          pageseg_devanagari_split_strategy: 1,
+          segment_nonalphabetic_script: 1,
+          tosp_old_to_method: "T",
+          tosp_old_to_constrain_sp_kn: "T",
+          tosp_old_sp_kn_th_factor: "4.0",
+          tosp_only_small_gaps_for_kern: "T",
+          tosp_use_pre_chopping: "T",
+          classify_misfit_junk_penalty: "0.125",
+          merge_fragments_in_matrix: "F"
+        });
+      }catch(e){ /* non-fatal: recognition still runs with defaults if this fails */ }
+      const blocks=[];
+      let lastPage=0;
+      for (let p=1;p<=pdf.numPages;p++){
+        if (this.cancel) break;
+        onProgress && onProgress({ page:p, pages:pdf.numPages, frac:0 });
+        const page=await pdf.getPage(p);
+        const vp1=page.getViewport({scale:1});
+        // Image pages are already raster: never upscale much (memory), and cap huge scans.
+        const scale = comic ? Math.min(2, Math.max(0.5, 2200/vp1.width)) : Math.min(3.5, Math.max(1.5, 2200/vp1.width));
+        const vp=page.getViewport({scale});
+        const pageHeightPts=vp1.height;
+        const canvas=el("canvas"); canvas.width=vp.width; canvas.height=vp.height;
+        const cx=canvas.getContext("2d",{willReadFrequently:true});
+        await page.render({canvasContext:cx, viewport:vp}).promise;
+        const gutterX = detectColumnGutter(canvas);
+
+        // Converts Tesseract's word bboxes (canvas pixel space, top-down,
+        // possibly relative to a cropped column) into the same top-down
+        // PDF-point-scaled space used by the text-layer extraction path.
+        function wordsFromResult(res, xOffsetPx){
+          // tesseract.js 5+/6 only returns word boxes inside data.blocks (and only when asked for them)
+          let raw = (res && res.data && Array.isArray(res.data.words)) ? res.data.words : null;
+          if (!raw && res && res.data && Array.isArray(res.data.blocks)){
+            raw=[]; res.data.blocks.forEach(bl=>(bl.paragraphs||[]).forEach(pa=>(pa.lines||[]).forEach(li=>(li.words||[]).forEach(w=>raw.push(w)))));
+          }
+          if (!raw || !raw.length) return null; // signals "no word-level data available"
+          const out=[];
+          raw.forEach(w=>{
+            if (!w || !w.text || !w.bbox) return;
+            const t=w.text.trim(); if(!t) return;
+            const x0=(w.bbox.x0+xOffsetPx)/scale, x1=(w.bbox.x1+xOffsetPx)/scale;
+            const y0=w.bbox.y0/scale, y1=w.bbox.y1/scale;
+            out.push({str:t, x:x0, y:y0, w:Math.max(0.5,x1-x0), h:Math.max(0.5,y1-y0)});
+          });
+          return out;
+        }
+
+        let pageText, pageWords=null;
+        if (gutterX != null){
+          const left = cropCanvas(canvas, 0, 0, gutterX, canvas.height);
+          const right = cropCanvas(canvas, gutterX, 0, canvas.width-gutterX, canvas.height);
+          const leftRes = await worker.recognize(left, {}, OCR_OUT);
+          const rightRes = await worker.recognize(right, {}, OCR_OUT);
+          pageText = leftRes.data.text + "\n\n" + rightRes.data.text;
+          const lw=wordsFromResult(leftRes,0), rw=wordsFromResult(rightRes,gutterX);
+          if (lw && rw) pageWords = lw.concat(rw);
+        } else {
+          const res = await worker.recognize(canvas, {}, OCR_OUT);
+          pageText = res.data.text;
+          pageWords = wordsFromResult(res, 0);
+        }
+
+        if (pageWords && pageWords.length){
+          // Match OCR'd words back to text-derived paragraphs by position in
+          // reading order: cut a new block every time as many words have
+          // been consumed as that paragraph contains. Assumes Tesseract's
+          // data.words is in the same order/count as data.text tokenizes to
+          // -- true in the normal case; a mismatch (e.g. an unusual
+          // hyphenation) only misaligns the highlight box for that one
+          // paragraph, not the read-aloud text itself, and never carries
+          // past a page boundary since this resets every page.
+          let wi=0;
+          pageText.split(/\n{2,}/).forEach(par=>{
+            const t=par.replace(/\s+/g," ").trim(); if(!t) return;
+            const n=t.split(/\s+/).filter(Boolean).length;
+            let slice=pageWords.slice(wi, wi+n); wi+=n;
+            slice=mergeStandaloneDevanagariMarks(slice);
+            const mergedText=slice.map(w=>w.str).join(" ") || t;
+            blocks.push({text:mergedText, words:slice, page:p, role:"body"});
+          });
+        } else {
+          pageText.split(/\n{2,}/).forEach(par=>{ const t=par.replace(/\s+/g," ").trim(); if(t) blocks.push({text:t, page:p, role:"body"}); });
+        }
+        lastPage=p;
+      }
+      return { blocks, pages: lastPage };
+    } finally {
+      if (origFetch) self.fetch = origFetch;
+      if (worker) { try{ await worker.terminate(); }catch(e){} }
+      try{ if(pdfSrcRef && pdfSrcRef.destroy) pdfSrcRef.destroy(); }catch(e){}
+    }
+  }
+};
+
+/* ---------- reader model ---------- */
+const Reader = {
+  words:[], sentStart:[], sentEnd:[], starts:[], pageStartWord:{}, totalPages:0, bodyWordCount:0,
+  mode:"text", pdfProxy:null, pageWrappers:{}, pageDisplayScale:{}, pagePtWidth:{}, pagePtHeight:{}, _io:null,
+
+  render(blocks, opts){
+    this.mode="text";
+    this._teardownPdf();
+    opts = opts || {};
+    const content=$("#content"); content.innerHTML="";
+    this.words=[]; this.sentStart=[]; this.sentEnd=[]; this.starts=[];
+    this.pageStartWord={}; this.totalPages=0; this.bodyWordCount=0;
+    const frag=document.createDocumentFragment();
+    let lastPage=null;
+    blocks.forEach(raw=>{
+      const b = (typeof raw==="string") ? {text:raw, role:"body"} : raw;
+      const role=b.role||"body";
+      const hasWords = Array.isArray(b.words) && b.words.length>0;
+      if (!hasWords && !(b.text||"").trim()) return;
+      if (b.page!=null){
+        if (b.page!==lastPage){ if(this.pageStartWord[b.page]==null) this.pageStartWord[b.page]=this.words.length; lastPage=b.page; }
+        if (b.page>this.totalPages) this.totalPages=b.page;
+      }
+      const p=el("p"); if(role!=="body") p.className="aux";
+      if (hasWords){
+        b.words.forEach((w,idx)=>{
+          if (idx>0) p.appendChild(document.createTextNode(" "));
+          const span=el("span","w"); span.textContent=w.str; span.dataset.i=this.words.length;
+          this.words.push({text:w.str, span, skip: role!=="body"}); p.appendChild(span);
+          if (role==="body") this.bodyWordCount++;
+        });
+      } else {
+        b.text.split(/(\s+)/).forEach(tok=>{
+          if(tok==="") return;
+          if(/^\s+$/.test(tok)){ p.appendChild(document.createTextNode(" ")); return; }
+          const span=el("span","w"); span.textContent=tok; span.dataset.i=this.words.length;
+          this.words.push({text:tok, span, skip: role!=="body"}); p.appendChild(span);
+          if (role==="body") this.bodyWordCount++;
+        });
+      }
+      if(this.words.length) this.words[this.words.length-1].blockEnd=true;
+      frag.appendChild(p);
+    });
+    if (opts.totalPages && opts.totalPages>this.totalPages) this.totalPages=opts.totalPages;
+    content.appendChild(frag); this.buildSentences();
+  },
+
+  // Renders the PDF as real page images (like any other PDF viewer) with a
+  // highlight box overlaid at the current word's position, instead of
+  // reflowing extracted text into styled paragraphs. Text is still extracted
+  // in the background (already done by the time this is called) purely to
+  // drive speech and highlighting.
+  async renderPdf(blocks, doc, opts){
+    opts = opts || {};
+    this.mode="pdf";
+    this._teardownPdf();
+    const content=$("#content"); content.innerHTML="";
+    this.words=[]; this.sentStart=[]; this.sentEnd=[]; this.starts=[];
+    this.pageStartWord={}; this.totalPages=0; this.bodyWordCount=0;
+    this.pageWrappers={}; this.pageDisplayScale={}; this.pagePtWidth={}; this.pagePtHeight={};
+
+    let lastPage=null;
+    blocks.forEach(raw=>{
+      const b = (typeof raw==="string") ? {text:raw, role:"body"} : raw;
+      const text=b.text||""; if(!text) return;
+      const role=b.role||"body";
+      if (b.page!=null){
+        if (b.page!==lastPage){ if(this.pageStartWord[b.page]==null) this.pageStartWord[b.page]=this.words.length; lastPage=b.page; }
+        if (b.page>this.totalPages) this.totalPages=b.page;
+      }
+      if (Array.isArray(b.words) && b.words.length){
+        b.words.forEach(w=>{
+          this.words.push({text:w.str, page:b.page, x:w.x, y:w.y, w:w.w, h:w.h, skip: role!=="body"});
+          if (role==="body") this.bodyWordCount++;
+        });
+      } else {
+        // No position data for this block (e.g. an OCR page where
+        // word-level output wasn't available) -- still read normally, just
+        // without a highlight box for these specific words.
+        text.split(/\s+/).filter(Boolean).forEach(tok=>{
+          this.words.push({text:tok, page:b.page, x:null, y:null, w:null, h:null, skip: role!=="body"});
+          if (role==="body") this.bodyWordCount++;
+        });
+      }
+      if (this.words.length) this.words[this.words.length-1].blockEnd=true;
+    });
+    if (opts.totalPages && opts.totalPages>this.totalPages) this.totalPages=opts.totalPages;
+    this.buildSentences();
+
+    this.pdfProxy = await openPageSource(doc);
+    const n = Math.max(this.totalPages, this.pdfProxy.numPages||0);
+    const frag=document.createDocumentFragment();
+    let firstDims=null; // image books: don't decode every page up front; assume page 1's shape until each page renders
+    for (let p=1;p<=n;p++){
+      let vp1;
+      if (this.pdfProxy.lazyDims && firstDims) vp1=firstDims;
+      else {
+        try{ vp1=(await this.pdfProxy.getPage(p)).getViewport({scale:1}); }
+        catch(e){ vp1={width:612,height:792}; }
+        if (this.pdfProxy.lazyDims) firstDims=vp1;
+      }
+      this.pagePtWidth[p]=vp1.width; this.pagePtHeight[p]=vp1.height;
+      const wrapper=el("div","pdfpage"); wrapper.dataset.page=String(p); wrapper.dataset.rendered="0";
+      wrapper.style.paddingTop=(vp1.height/vp1.width*100)+"%";
+      wrapper.appendChild(el("canvas"));
+      wrapper.appendChild(el("div","pdfhl"));
+      const label=el("div","pdfpagenum"); label.textContent="Page "+p; wrapper.appendChild(label);
+      wrapper.addEventListener("click",(e)=>{
+        const canvas=wrapper.querySelector("canvas"); const rect=canvas.getBoundingClientRect();
+        const scale=this.pageDisplayScale[p] || (rect.width/(this.pagePtWidth[p]||612));
+        const px=(e.clientX-rect.left)/scale, py=(e.clientY-rect.top)/scale;
+        const idx=this.wordIndexNearPoint(p, px, py);
+        if (idx!=null) handleWordTap(idx);
+      });
+      this.pageWrappers[p]=wrapper;
+      frag.appendChild(wrapper);
+    }
+    content.appendChild(frag);
+
+    this._io = new IntersectionObserver((entries)=>{
+      entries.forEach(entry=>{
+        const wrapper=entry.target; const p=Number(wrapper.dataset.page);
+        if (entry.isIntersecting){ if (wrapper.dataset.rendered!=="1") renderPageCanvas(wrapper,p); }
+        else if (wrapper.dataset.rendered==="1"){ clearPageCanvas(wrapper); }
+      });
+    }, { root: $("#reader"), rootMargin: "120% 0px 120% 0px" });
+    Object.values(this.pageWrappers).forEach(w=>this._io.observe(w));
+  },
+
+  _teardownPdf(){
+    if (this._io){ this._io.disconnect(); this._io=null; }
+    if (this.pdfProxy){ try{ this.pdfProxy.destroy(); }catch(e){} this.pdfProxy=null; }
+    this.pageWrappers={};
+  },
+
+  wordIndexNearPoint(page, px, py){
+    let best=null, bestDist=Infinity;
+    for (let i=0;i<this.words.length;i++){
+      const w=this.words[i]; if (w.page!==page || w.x==null) continue;
+      const dx=(w.x+w.w/2)-px, dy=(w.y+w.h/2)-py;
+      const dist=dx*dx+dy*dy;
+      if (dist<bestDist){ bestDist=dist; best=i; }
+    }
+    return best;
+  },
+
+  buildSentences(){
+    const n=this.words.length; this.sentStart=new Array(n); this.sentEnd=new Array(n);
+    let start=0; const closers=/[.!?…]["'”’)\]]*$/;
+    for(let i=0;i<n;i++){ const w=this.words[i];
+      if(closers.test(w.text)||w.blockEnd||(i-start>=40)||i===n-1){
+        for(let j=start;j<=i;j++){ this.sentStart[j]=start; this.sentEnd[j]=i; }
+        this.starts.push(start); start=i+1;
+      }
+    }
+  },
+  textFrom(a,b){ let s=""; for(let i=a;i<=b;i++){ s+=(i>a?" ":"")+this.words[i].text; } return s; },
+  wordIndexForPage(n){
+    if(!this.totalPages) return null;
+    n=Math.max(1, Math.min(n, this.totalPages));
+    if(this.pageStartWord[n]!=null) return this.pageStartWord[n];
+    for(let p=n;p<=this.totalPages;p++){ if(this.pageStartWord[p]!=null) return this.pageStartWord[p]; }
+    for(let p=n;p>=1;p--){ if(this.pageStartWord[p]!=null) return this.pageStartWord[p]; }
+    return null;
+  }
+};
+
+async function renderPageCanvas(wrapper, pageNum){
+  if (wrapper.dataset.rendered==="1" || wrapper.dataset.rendering==="1" || !Reader.pdfProxy) return;
+  wrapper.dataset.rendering="1";
+  try{
+    const page = await Reader.pdfProxy.getPage(pageNum);
+    const cssWidth = wrapper.clientWidth || 800;
+    const vp1 = page.getViewport({scale:1});
+    const displayScale = cssWidth / vp1.width;
+    Reader.pagePtWidth[pageNum]=vp1.width; Reader.pagePtHeight[pageNum]=vp1.height;
+    wrapper.style.paddingTop=(vp1.height/vp1.width*100)+"%";
+    const dpr = Math.min(2, window.devicePixelRatio||1); // capped to bound memory on very high-density screens
+    const vp = page.getViewport({scale: displayScale*dpr});
+    const canvas = wrapper.querySelector("canvas");
+    canvas.width = Math.round(vp.width); canvas.height = Math.round(vp.height);
+    await page.render({canvasContext:canvas.getContext("2d"), viewport:vp}).promise;
+    Reader.pageDisplayScale[pageNum] = displayScale;
+    wrapper.dataset.rendered="1";
+    if (typeof Annot!=="undefined") Annot.items.filter(a=>a.page===pageNum).forEach(a=>Annot.renderOne(a));
+  } catch(e){ console.error("PDF page render failed", pageNum, e); }
+  finally { wrapper.dataset.rendering="0"; }
+}
+function clearPageCanvas(wrapper){
+  // Un-render pages that scroll far out of view: a book-length PDF rendered
+  // fully at once would hold hundreds of full-resolution canvases in memory
+  // simultaneously and crash the WebView. The wrapper's height is already
+  // reserved via padding-top (set from the page's aspect ratio before any
+  // rendering happens), so clearing the canvas doesn't shift scroll position.
+  const canvas = wrapper.querySelector("canvas");
+  if (canvas){ canvas.width=0; canvas.height=0; }
+  wrapper.querySelectorAll(".pdfannot:not(.sel-preview-pdf)").forEach(n=>n.remove());
+  wrapper.dataset.rendered="0";
+}
+
+/* ---------- speech ---------- */
+const Speech = {
+  synth:window.speechSynthesis, playing:false, cursor:0, utter:null, voices:[],
+  loadVoices(){
+    this.voices=this.synth?this.synth.getVoices():[];
+    const sel=$("#voiceSel");
+    if(!this.voices.length){ sel.innerHTML="<option>Default</option>"; return; }
+    const cur=sel.value; sel.innerHTML="";
+    this.voices.forEach((v,i)=>{ const o=el("option"); o.value=i; o.textContent=`${v.name} (${v.lang})${v.default?" ★":""}`; sel.appendChild(o); });
+    if(!cur){ const def=this.voices.findIndex(v=>v.default); const en=this.voices.findIndex(v=>/^en/i.test(v.lang)); sel.value=def>=0?def:(en>=0?en:0); } else sel.value=cur;
+  },
+  currentVoice(){ const i=parseInt($("#voiceSel").value,10); return Number.isFinite(i)?this.voices[i]:null; },
+  speakFrom(wordIdx, force){
+    if(!this.synth){ dlgAlert("No speech engine","This device has no text-to-speech engine available."); return; }
+    this.synth.cancel();
+    if(!force){
+      // Silently skip past whole header/footer/footnote blocks rather than
+      // reading them -- but only for automatic continuation/navigation.
+      // A direct tap on that text (force=true) is still honored below.
+      while(wordIdx<Reader.words.length && Reader.words[wordIdx].skip){
+        wordIdx = Reader.sentEnd[wordIdx]+1;
+      }
+    }
+    if(wordIdx>=Reader.words.length){ this.stop(true); return; }
+    const endWord=Reader.sentEnd[wordIdx]; const text=Reader.textFrom(wordIdx,endWord);
+    const offs=[]; let acc=0;
+    for(let i=wordIdx;i<=endWord;i++){ offs.push({at:acc,word:i}); acc+=Reader.words[i].text.length+1; }
+    this.cursor=wordIdx;
+    const u=new SpeechSynthesisUtterance(text);
+    const v=this.currentVoice(); if(v){ u.voice=v; u.lang=v.lang; }
+    u.rate=parseFloat($("#rate").value); u.pitch=parseFloat($("#pitch").value);
+    u.onboundary=(e)=>{ if(e.name && e.name!=="word") return;
+      let lo=0,hi=offs.length-1,pick=0;
+      while(lo<=hi){ const mid=(lo+hi)>>1; if(offs[mid].at<=e.charIndex){ pick=mid; lo=mid+1; } else hi=mid-1; }
+      highlight(offs[pick].word); this.cursor=offs[pick].word; UI.updateSeek(offs[pick].word); saveProgress();
+    };
+    u.onend=()=>{ if(!this.playing) return; markReadUpTo(endWord); this.cursor=endWord+1; this.speakFrom(endWord+1); };
+    u.onerror=(ev)=>{ if(ev.error!=="interrupted"&&ev.error!=="canceled") setStatus("Speech error: "+ev.error); };
+    this.utter=u; this.synth.speak(u);
+  },
+  play(force){ if(!Reader.words.length) return; this.playing=true; UI.setPlaying(true); Native.keepOn(true);
+    if(this.synth.paused&&this.synth.speaking) this.synth.resume(); else this.speakFrom(this.cursor||0, force); },
+  pause(){ this.playing=false; UI.setPlaying(false); Native.keepOn(false); if(this.synth.speaking) this.synth.pause(); saveProgress(true); },
+  toggle(){ this.playing?this.pause():this.play(); },
+  stop(finished){ this.playing=false; UI.setPlaying(false); Native.keepOn(false); if(this.synth) this.synth.cancel(); if(finished) setStatus("Finished."); saveProgress(true); },
+  seekTo(wordIdx,resume){ wordIdx=Math.max(0,Math.min(wordIdx,Reader.words.length-1)); const s=Reader.sentStart[wordIdx];
+    this.cursor=s; highlight(s); markReadUpTo(s-1); UI.updateSeek(s); saveProgress(true); if(resume&&this.playing) this.speakFrom(s); },
+  next(){ this.jump(Reader.sentEnd[this.cursor]+1); },
+  prev(){ const cs=Reader.sentStart[this.cursor]; this.jump(cs>0?Reader.sentStart[cs-1]:0); },
+  jump(wordIdx){ if(wordIdx>=Reader.words.length){ this.stop(true); return; } wordIdx=Math.max(0,wordIdx); this.cursor=wordIdx;
+    highlight(wordIdx); markReadUpTo(wordIdx-1); UI.updateSeek(wordIdx); saveProgress(true); if(this.playing) this.speakFrom(wordIdx); }
+};
+
+let lastHi=-1;
+// Margins scale with the reader's actual current height so this behaves
+// sensibly in both the normal layout (header/footer visible, #reader is
+// shorter) and fullscreen (header/footer hidden, #reader nearly fills the
+// screen) -- fixed pixel margins tuned for one don't translate to the other.
+function highlight(i){
+  if(i===lastHi) return;
+  if (Reader.mode==="pdf"){ highlightPdf(i); lastHi=i; return; }
+  if(lastHi>=0 && Reader.words[lastHi] && Reader.words[lastHi].span) Reader.words[lastHi].span.classList.remove("speaking");
+  const w=Reader.words[i];
+  if(w && w.span){ w.span.classList.add("speaking"); w.span.classList.remove("read");
+    w.span.scrollIntoView({block:"nearest",behavior:"smooth"});
+  }
+  lastHi=i;
+}
+function markReadUpTo(i){
+  if (Reader.mode==="pdf") return; // no trailing "already read" shading over a real page image
+  for(let k=0;k<=i&&k<Reader.words.length;k++){ const w=Reader.words[k]; if(w.span){ const c=w.span.classList; c.remove("speaking"); c.add("read"); } }
+  for(let k=i+1;k<Reader.words.length;k++){ const w=Reader.words[k]; if(w.span) w.span.classList.remove("read"); }
+}
+function highlightPdf(i){
+  const w=Reader.words[i]; if(!w || w.page==null || w.x==null) return;
+  Object.keys(Reader.pageWrappers).forEach(p=>{
+    if (Number(p)!==w.page){ const hl=Reader.pageWrappers[p].querySelector(".pdfhl"); if(hl) hl.style.display="none"; }
+  });
+  const wrapper=Reader.pageWrappers[w.page]; if(!wrapper) return;
+  const positionAndShow=()=>{
+    const scale=Reader.pageDisplayScale[w.page] || (wrapper.clientWidth/(Reader.pagePtWidth[w.page]||612));
+    const hl=wrapper.querySelector(".pdfhl");
+    hl.style.left=(w.x*scale)+"px"; hl.style.top=(w.y*scale)+"px";
+    hl.style.width=(Math.max(w.w,4)*scale)+"px"; hl.style.height=(Math.max(w.h,4)*scale)+"px";
+    hl.style.display="block";
+    hl.scrollIntoView({block:"nearest",behavior:"smooth"});
+  };
+  if (wrapper.dataset.rendered==="1") positionAndShow();
+  else renderPageCanvas(wrapper, w.page).then(positionAndShow);
+}
+
+let _saveT=0;
+function saveProgress(force){
+  if(UI.activeId==null || !Reader.words.length) return;
+  const now=Date.now(); if(!force && now-_saveT<2500) return; _saveT=now;
+  DB.setMeta(UI.activeId,{ progress:Speech.cursor, wordCount:Reader.words.length, lastOpened:now });
+}
+
+const UI = {
+  activeId:null,
+  setPlaying(on){ $("#playIcon").innerHTML=on?'<path d="M6 5h4v14H6zM14 5h4v14h-4z"/>':'<path d="M8 5v14l11-7z"/>'; $("#playBtn").title=on?"Pause":"Play"; },
+  enableControls(on){ ["#playBtn","#prevBtn","#nextBtn","#seek"].forEach(s=>$(s).disabled=!on); },
+  updateSeek(wordIdx){ $("#seek").value=wordIdx;
+    const pct=Reader.words.length?Math.round((wordIdx/(Reader.words.length-1))*100):0;
+    $("#posLabel").textContent=pct+"%"; $("#wordHint").textContent=`word ${wordIdx+1} of ${Reader.words.length}`; },
+  refreshLibrary(){ return Shelf.render(); }
+};
+
+/* ---------- shelf: library home screen with folders ---------- */
+const Shelf = {
+  cwd:null, visible:false, overReader:false, sort:"recent",
+  async _load(){
+    const [docs,metas]=await Promise.all([DB.allDocs(),DB.allMeta()]);
+    const metaById={}; metas.forEach(m=>metaById[m.id]=m);
+    const folders=metas.filter(m=>m.kind==="folder");
+    const fids=new Set(folders.map(f=>f.id));
+    const folderOf=(d)=>{ const f=metaById[d.id]&&metaById[d.id].folderId; return (f&&fids.has(f))?f:null; };
+    return {docs,metaById,folders,fids,folderOf};
+  },
+  chain(folders, id){ const out=[]; let cur=id; const seen=new Set();
+    while(cur && !seen.has(cur)){ seen.add(cur); const f=folders.find(x=>x.id===cur); if(!f) break; out.unshift(f); cur=f.parent||null; }
+    return out; },
+  show(overReader){ this.visible=true; this.overReader=!!overReader&&UI.activeId!=null; $("#shelf").hidden=false; return this.render(); },
+  hide(){ this.visible=false; $("#shelf").hidden=true; },
+  async up(){
+    const {folders}=await this._load(); const f=folders.find(x=>x.id===this.cwd);
+    this.cwd=(f&&f.parent)||null; return this.render();
+  },
+  async render(){
+    if(!this.visible) return;
+    const {docs,metaById,folders,fids,folderOf}=await this._load();
+    if(this.cwd && !fids.has(this.cwd)) this.cwd=null;
+    // breadcrumbs
+    const crumbs=$("#crumbs"); crumbs.innerHTML="";
+    const mk=(label,id,last)=>{ const b=el("button"); b.textContent=label; b.onclick=()=>{ this.cwd=id; this.render(); }; crumbs.appendChild(b);
+      if(!last){ const sp=el("span","sep"); sp.textContent="›"; crumbs.appendChild(sp); } };
+    const chain=this.chain(folders,this.cwd);
+    mk("Library",null,chain.length===0);
+    chain.forEach((f,i)=>mk(f.name,f.id,i===chain.length-1));
+    // data for this level
+    const here=docs.filter(d=>folderOf(d)===this.cwd);
+    const subs=folders.filter(f=>((f.parent&&fids.has(f.parent))?f.parent:null)===this.cwd).sort((a,b)=>naturalCmp(a.name||"",b.name||""));
+    const pctOf=(d)=>{ const m=metaById[d.id]; return (m&&m.progress>0&&m.wordCount>1)?Math.min(100,Math.round(m.progress/(m.wordCount-1)*100)):0; };
+    const last=(d)=>(metaById[d.id]&&metaById[d.id].lastOpened)||d.addedAt||0;
+    if(this.sort==="name") here.sort((a,b)=>naturalCmp(a.name,b.name));
+    else if(this.sort==="progress") here.sort((a,b)=>pctOf(b)-pctOf(a)||last(b)-last(a));
+    else here.sort((a,b)=>last(b)-last(a));
+    const list=$("#libList"); list.innerHTML="";
+    if(!subs.length && !here.length){
+      list.innerHTML = this.cwd ? '<div class="empty">This folder is empty.<br>Tap “Add files” to import books here.</div>'
+        : '<div class="empty">Your library is empty.<br>Tap “Add files” to import PDF, EPUB, MOBI, DOCX, FB2, TXT, Markdown, HTML or comic (CBZ/CBR) files.</div>';
+      return;
+    }
+    subs.forEach(f=>{
+      const li=el("li"); const ic=el("div","ficon folder"); ic.textContent="📁";
+      const meta=el("div","meta"); const nm=el("div","name"); nm.textContent=f.name;
+      const sub=el("div","sub"); const n=docs.filter(d=>folderOf(d)===f.id).length+folders.filter(x=>x.parent===f.id).length;
+      sub.textContent=n+(n===1?" item":" items"); meta.append(nm,sub);
+      const more=el("button","more"); more.textContent="⋯"; more.title="Folder options";
+      more.onclick=(e)=>{ e.stopPropagation(); this.folderMenu(f); };
+      li.append(ic,meta,more); li.onclick=()=>{ this.cwd=f.id; this.render(); }; list.appendChild(li);
+    });
+    here.forEach(d=>{
+      const li=el("li"); if(d.id===UI.activeId) li.classList.add("active"); li.dataset.id=d.id;
+      const ext=extOf(d.name); const ic=el("div","ficon "+ext); ic.textContent=ext.toUpperCase().slice(0,5);
+      const meta=el("div","meta"); const nm=el("div","name"); nm.textContent=d.name;
+      const sub=el("div","sub"); const size=el("span"); size.textContent=fmtSize(d.size); sub.appendChild(size);
+      const pc=pctOf(d); if(pc>0){ const pill=el("span","pill progress"); pill.textContent=pc+"%"; sub.appendChild(pill); }
+      if(d.ocrText){ const pill=el("span","pill"); pill.textContent="OCR"; sub.appendChild(pill); }
+      meta.append(nm,sub);
+      const more=el("button","more"); more.textContent="⋯"; more.title="Book options";
+      more.onclick=(e)=>{ e.stopPropagation(); this.bookMenu(d); };
+      li.append(ic,meta,more); li.onclick=()=>openDoc(d.id); list.appendChild(li);
+    });
+  },
+  async newFolder(parent){
+    const name=(await dlgPrompt("New folder","","Folder name")||"").trim(); if(!name) return null;
+    const id="folder:"+uid(); await DB.setMeta(id,{kind:"folder",name,parent:parent==null?null:parent,createdAt:Date.now()});
+    return id;
+  },
+  async folderMenu(f){
+    const c=await dlgChoose(f.name,[{label:"Rename",value:"rename"},{label:"Delete folder (books are kept)",value:"del",danger:true}]);
+    if(c==="rename"){ const n=(await dlgPrompt("Rename folder",f.name)||"").trim(); if(n){ await DB.setMeta(f.id,{name:n}); } }
+    else if(c==="del"){
+      if(!await dlgConfirm("Delete folder?","“"+f.name+"” will be removed. Its books and sub-folders move up one level.","Delete")) return;
+      const {docs,folders}=await this._load(); const parent=f.parent||null;
+      for(const d of docs){ const m=await DB.getMeta(d.id); if(m&&m.folderId===f.id) await DB.setMeta(d.id,{folderId:parent}); }
+      for(const x of folders){ if(x.parent===f.id) await DB.setMeta(x.id,{parent}); }
+      await DB.delMeta(f.id);
+    }
+    await this.render();
+  },
+  async bookMenu(d){
+    const c=await dlgChoose(d.name,[{label:"Open",value:"open"},{label:"Move to folder…",value:"move"},{label:"Delete from library",value:"del",danger:true}]);
+    if(c==="open") openDoc(d.id);
+    else if(c==="move") await this.moveBook(d);
+    else if(c==="del") await this.deleteBook(d);
+  },
+  async moveBook(d){
+    const {folders,metaById}=await this._load(); const cur=(metaById[d.id]&&metaById[d.id].folderId)||null;
+    const label=(f)=>this.chain(folders,f.id).map(x=>x.name).join(" / ");
+    const opts=[{label:(cur==null?"✓ ":"")+"📚 Library (top level)",value:"__root"}];
+    folders.slice().sort((a,b)=>naturalCmp(label(a),label(b))).forEach(f=>opts.push({label:(cur===f.id?"✓ ":"")+"📁 "+label(f),value:f.id}));
+    opts.push({label:"＋ New folder…",value:"__new"});
+    let c=await dlgChoose("Move “"+d.name+"” to",opts); if(c==null) return;
+    if(c==="__new"){ c=await this.newFolder(this.cwd); if(!c) return; }
+    await DB.setMeta(d.id,{folderId:c==="__root"?null:c});
+    await this.render();
+  },
+  async deleteBook(d){
+    if(!await dlgConfirm("Remove book?","Remove “"+d.name+"” from your library? Its highlights and notes are deleted too.","Remove")) return;
+    if(UI.activeId===d.id) closeCurrentDoc();
+    await Promise.all([DB.delDoc(d.id),DB.delMeta(d.id),DB.delAnnotationsForDoc(d.id)]);
+    if(comicCache.id===d.id){ comicCache.id=null; comicCache.entries=null; }
+    await this.render();
+  }
+};
+$("#newFolderBtn").onclick=async()=>{ if(await Shelf.newFolder(Shelf.cwd)) Shelf.render(); };
+$("#sortSel").onchange=(e)=>{ Shelf.sort=e.target.value; Shelf.render(); try{ DB.setMeta(Theme.SETTINGS_ID,{sort:Shelf.sort}); }catch(_){} };
+(async()=>{ try{ const m=await DB.getMeta(Theme.SETTINGS_ID); if(m&&m.sort){ Shelf.sort=m.sort; $("#sortSel").value=m.sort; } }catch(e){} })();
+
+const WELCOME_HTML=$("#content").innerHTML;
+function closeCurrentDoc(){
+  UI.activeId=null; Speech.stop(); currentDoc=null; currentBlocks=null;   // null the id first so stop() doesn't re-save progress for a deleted book
+  Reader.render([]); $("#content").innerHTML=WELCOME_HTML;
+  $("#welcomeAdd").onclick=()=>$("#fileInput").click();
+  $("#docTitle").textContent="No document open"; setStatus("Add a book to begin.");
+  UI.enableControls(false); hideOcrBar(); updatePageNav(); updateViewModeBtn(false,"text");
+  if(!Shelf.visible) Shelf.show(false);
+}
+
+async function importFiles(fileList){
+  const all=[...fileList];
+  const files=all.filter(f=>ALL_EXTS.includes(extOf(f.name)));
+  const skipped=all.filter(f=>!ALL_EXTS.includes(extOf(f.name)));
+  if(!files.length){ await dlgAlert("Unsupported file","Supported formats: PDF, EPUB, MOBI/AZW/AZW3, DOCX, FB2, TXT, Markdown, HTML, CBZ/CBR (ZIP/RAR of images)."); return; }
+  const target=Shelf.cwd; let firstId=null;
+  for(const f of files){ const id=uid();
+    await DB.putDoc({id,name:f.name,size:f.size,type:f.type,addedAt:Date.now(),blob:f});
+    if(target) await DB.setMeta(id,{folderId:target});
+    if(!firstId) firstId=id; }
+  await UI.refreshLibrary();
+  if(skipped.length) await dlgAlert("Some files were skipped","Not a supported format:\n"+skipped.map(f=>"• "+f.name).join("\n"));
+  if(files.length===1 && firstId) openDoc(firstId);
+  else setStatus("Added "+files.length+" books.");
+}
+
+let parseToken=0;
+async function openDoc(id){
+  const token=++parseToken; Speech.stop();
+  const doc=await DB.getDoc(id); if(!doc) return;
+  UI.activeId=id; Shelf.hide();
+  hideOcrBar();
+  $("#docTitle").textContent=doc.name;
+  $("#content").innerHTML='<div class="welcome"><h1>⏳</h1><p>Preparing this document…</p></div>';
+  setStatus("Reading "+doc.name+" …"); UI.enableControls(false);
+  try{
+    let blocks, fromOcr=false;
+    if(doc.ocrText&&doc.ocrText.length){ blocks=doc.ocrText; fromOcr=true; }
+    else { const ctx={}; blocks=await parseDoc(doc,(p)=>{ if(token===parseToken) setStatus(`Reading… ${Math.round(p*100)}%`); },ctx); doc._ctx=ctx; }
+    if(token!==parseToken) return;
+    if(!blocks.length && !(doc._ctx&&doc._ctx.comic)) blocks=["(No readable text was found in this document.)"];
+    finishOpen(doc,blocks,fromOcr);
+  }catch(err){ if(token!==parseToken) return; console.error(err);
+    $("#content").innerHTML='<div class="welcome"><h1>⚠️</h1><p>Could not read this file.</p></div>'; setStatus("Error: "+(err.message||err)); }
+}
+
+let currentDoc=null, currentBlocks=null, currentFromOcr=false;
+async function finishOpen(doc, blocks, fromOcr){
+  currentDoc=doc; currentBlocks=blocks; currentFromOcr=fromOcr;
+  if (typeof Annot!=="undefined") Annot.cancelSelection();
+  const ext = extOf(doc.name);
+  const isPdf = isPagedExt(ext);        // page-image documents: PDF and comics
+  const isComic = isComicExt(ext);
+  let mode = "text";
+  let autoFellBack=false;
+  if (isComic && !fromOcr){ mode="pdf"; }   // nothing to reflow until OCR has produced text
+  else if (isPdf){
+    let pref="pdf";
+    try{ const s=await DB.getMeta(Theme.SETTINGS_ID); if(s&&s.viewMode) pref=s.viewMode; }catch(e){}
+    const hasAnyPosition = blocks.some(b => b && typeof b==="object" && Array.isArray(b.words) && b.words.length>0);
+    if (pref==="pdf" && !hasAnyPosition){ mode="text"; autoFellBack=true; }
+    else mode = pref;
+  }
+
+  if (isPdf && mode==="pdf") await Reader.renderPdf(blocks, doc, { totalPages: doc._ctx&&doc._ctx.pages });
+  else Reader.render(blocks, { totalPages: doc._ctx&&doc._ctx.pages });
+  await Annot.loadForDoc(doc.id);
+
+  lastHi=-1;
+  const seek=$("#seek"); seek.max=Math.max(0,Reader.words.length-1); seek.value=0; seek.disabled=false;
+  UI.enableControls(true);
+  updatePageNav();
+  updateViewModeBtn(isPdf, mode);
+  const meta=await DB.getMeta(doc.id); let resumedPct=0;
+  if(meta&&meta.progress>0&&meta.progress<Reader.words.length){
+    Speech.cursor=meta.progress; highlight(meta.progress); markReadUpTo(meta.progress-1); UI.updateSeek(meta.progress);
+    resumedPct=Math.round((meta.progress/(Reader.words.length-1))*100);
+    setTimeout(()=>{ const w=Reader.words[meta.progress]; if(w&&w.span) w.span.scrollIntoView({block:"center"}); },60);
+  } else { Speech.cursor=0; UI.updateSeek(0); }
+  DB.setMeta(doc.id,{ wordCount:Reader.words.length, lastOpened:Date.now() });
+  const wc=Reader.bodyWordCount; const base=`${wc.toLocaleString()} words · ${Reader.starts.length.toLocaleString()} sentences`;
+  const fallbackNote = autoFellBack ? " (switched to text view — this document has no word positions to tap in PDF view)" : "";
+  setStatus((resumedPct?`Resumed at ${resumedPct}% · ${base}.`:`Ready · ${base}.`)+` Tap a word or press play.${fallbackNote}`);
+  const pages=doc._ctx&&doc._ctx.pages;
+  const lowText=!fromOcr && ext==="pdf" && (Reader.bodyWordCount<Math.max(25,(pages||1)*10));
+  if(isComic && !fromOcr){ showOcrBar(doc, "comic"); setStatus(`${(pages||0).toLocaleString()} pages · run OCR to read this aloud.`); }
+  else if(lowText) showOcrBar(doc, "scanned");
+  else if(!fromOcr && ext==="pdf" && looksLikeGarbledDevanagari()) showOcrBar(doc, "garbled");
+}
+
+function updateViewModeBtn(isPdf, mode){
+  const row=$("#viewModeRow"), btn=$("#viewModeBtn");
+  if (!isPdf){ row.hidden=true; return; }
+  row.hidden=false;
+  btn.textContent = mode==="pdf" ? "\uD83D\uDCC4 PDF view (tap to switch to Text)" : "\uD83D\uDCDD Text view (tap to switch to PDF)";
+}
+$("#viewModeBtn").onclick=async()=>{
+  if (!currentDoc || !currentBlocks) return;
+  const next = Reader.mode==="pdf" ? "text" : "pdf";
+  const savedCursor = Speech.cursor||0;
+  Speech.stop();
+  try{ await DB.setMeta(Theme.SETTINGS_ID,{viewMode:next}); }catch(e){}
+  if (next==="pdf") await Reader.renderPdf(currentBlocks, currentDoc, { totalPages: currentDoc._ctx&&currentDoc._ctx.pages });
+  else Reader.render(currentBlocks, { totalPages: currentDoc._ctx&&currentDoc._ctx.pages });
+  Annot.renderAll();
+  lastHi=-1;
+  $("#seek").max=Math.max(0,Reader.words.length-1);
+  updatePageNav();
+  updateViewModeBtn(true, next);
+  const idx=Math.min(savedCursor, Math.max(0,Reader.words.length-1));
+  Speech.cursor=idx; highlight(idx); UI.updateSeek(idx);
+  closeMoreMenu();
+};
+
+let ocrDocRef=null;
+// Devanagari combining marks (matras, anusvara, visarga, candrabindu, nukta,
+// virama, and related vowel-sign variants) that can never legally start a
+// word -- they must follow a consonant. A meaningful fraction of words
+// starting with one of these is a strong, font-agnostic signal that the
+// PDF's text layer comes from a legacy non-Unicode Hindi font (Kruti Dev,
+// DevLys, Chanakya, and similar were common in Indian publishing) rather
+// than genuine extracted text -- the glyphs render correctly in a normal
+// viewer, but the underlying character codes aren't real Unicode.
+const DEVANAGARI_BAD_START = /^[\u0900-\u0903\u093A\u093C\u093E-\u094D\u0951-\u0957\u0962\u0963]/;
+function looksLikeGarbledDevanagari(){
+  let checked=0, bad=0;
+  for (const w of Reader.words){
+    if (w.skip) continue;
+    const t=w.text;
+    if (!/[\u0900-\u097F]/.test(t)) continue; // only count words with some Devanagari content
+    checked++;
+    if (DEVANAGARI_BAD_START.test(t)) bad++;
+    if (checked>=2000) break; // sampling this many words is plenty to detect systemic corruption
+  }
+  return checked>=30 && (bad/checked) > 0.04;
+}
+
+function showOcrBar(doc, reason){
+  ocrDocRef=doc;
+  $("#ocrMsg").textContent = reason==="comic"
+    ? "These are page images. Run OCR so the text can be read aloud and highlighted (works offline; may take a while for long comics)."
+    : reason==="garbled"
+    ? "This page displays fine, but its underlying text looks scrambled — likely a legacy (non-Unicode) font. Run OCR so it can be read aloud correctly (works offline)."
+    : "This page displays fine, but little selectable text was found underneath it — likely a scan. Run OCR so it can be read aloud (works offline).";
+  if (reason==="garbled") $("#ocrLangOrder").value="hin+eng";
+  if (reason==="comic") $("#ocrLangOrder").value="eng+hin";
+  $("#ocrProg").hidden=true; $("#ocrCancel").hidden=true; $("#ocrRun").hidden=false; $("#ocrRun").disabled=false; $("#ocrDismiss").hidden=false; $("#ocrLangOrder").hidden=false;
+  $("#ocrBar").classList.add("show");
+}
+function hideOcrBar(){ $("#ocrBar").classList.remove("show"); ocrDocRef=null; }
+$("#ocrDismiss").onclick=hideOcrBar;
+$("#ocrCancel").onclick=()=>{ OCR.cancel=true; $("#ocrCancel").disabled=true; $("#ocrMsg").textContent="Cancelling…"; };
+$("#ocrRun").onclick=async()=>{
+  if(!ocrDocRef) return; const doc=ocrDocRef; Speech.stop();
+  const langOrder=$("#ocrLangOrder").value;
+  $("#ocrRun").hidden=true; $("#ocrDismiss").hidden=true; $("#ocrLangOrder").hidden=true; $("#ocrCancel").hidden=false; $("#ocrCancel").disabled=false;
+  $("#ocrProg").hidden=false; $("#ocrProg").value=0; $("#ocrMsg").textContent="Starting OCR engine…";
+  let curPage=1, totalPages=1;
+  try{
+    const result=await OCR.run(doc,(p)=>{
+      if(p.page){ curPage=p.page; totalPages=p.pages; $("#ocrMsg").textContent=`OCR — page ${p.page} of ${p.pages}…`; }
+      if(typeof p.frac==="number"){ $("#ocrProg").value=Math.min(100,Math.round(((curPage-1)+p.frac)/totalPages*100)); }
+    }, langOrder);
+    const blocks=result.blocks;
+    if(OCR.cancel){ hideOcrBar(); setStatus("OCR cancelled."); return; }
+    if(!blocks.length){ $("#ocrMsg").textContent="OCR found no readable text on these pages."; $("#ocrCancel").hidden=true; $("#ocrDismiss").hidden=false; return; }
+    doc.ocrText=blocks; doc._ctx={pages:result.pages};
+    const stored=await DB.getDoc(doc.id); stored.ocrText=blocks; stored._ctx=doc._ctx; await DB.putDoc(stored);
+    hideOcrBar(); finishOpen(stored,blocks,true); UI.refreshLibrary();
+  }catch(err){ console.error(err);
+    $("#ocrMsg").textContent="OCR failed: "+(err.message||err);
+    $("#ocrCancel").hidden=true; $("#ocrDismiss").hidden=false; $("#ocrRun").hidden=false; $("#ocrRun").disabled=false;
+  }
+};
+
+function updatePageNav(){
+  const nav=$("#pageNav"); const tp=Reader.totalPages||0;
+  if (tp>1){
+    nav.hidden=false;
+    $("#pageInput").max=tp; $("#pageInput").value=1;
+    $("#pageTotal").textContent=tp;
+  } else {
+    nav.hidden=true;
+  }
+}
+function goToPage(){
+  const n=parseInt($("#pageInput").value,10);
+  if(!Number.isFinite(n)) return;
+  const idx=Reader.wordIndexForPage(n);
+  if(idx==null){ setStatus("No content found for that page."); return; }
+  Speech.jump(idx);
+}
+$("#pageGoBtn").onclick=goToPage;
+
+let _resizeSettleT=0;
+function handleReaderResize(){
+  if (Reader.mode!=="pdf") return;
+  Object.keys(Reader.pageWrappers).forEach(pStr=>{
+    const p=Number(pStr), wrapper=Reader.pageWrappers[p];
+    if (wrapper.dataset.rendered==="1"){
+      Reader.pageDisplayScale[p] = wrapper.clientWidth/(Reader.pagePtWidth[p]||612);
+    }
+  });
+  // If the current highlight is on a page whose scale just changed,
+  // reposition it immediately rather than waiting for the next word.
+  if (Speech.cursor!=null && lastHi>=0) highlightPdf(lastHi);
+  clearTimeout(_resizeSettleT);
+  _resizeSettleT=setTimeout(()=>{
+    Object.keys(Reader.pageWrappers).forEach(pStr=>{
+      const p=Number(pStr), wrapper=Reader.pageWrappers[p];
+      if (wrapper.dataset.rendered==="1"){ wrapper.dataset.rendered="0"; renderPageCanvas(wrapper,p); }
+    });
+  }, 300);
+}
+new ResizeObserver(()=>handleReaderResize()).observe($("#reader"));
+
+function openMoreMenu(){
+  const btn=$("#moreBtn"), menu=$("#moreMenu");
+  const r=btn.getBoundingClientRect();
+  menu.style.top=(r.bottom+8)+"px";
+  menu.style.right=(window.innerWidth-r.right)+"px";
+  menu.hidden=false;
+}
+function closeMoreMenu(){ $("#moreMenu").hidden=true; }
+$("#moreBtn").onclick=(e)=>{ e.stopPropagation(); $("#moreMenu").hidden ? openMoreMenu() : closeMoreMenu(); };
+document.addEventListener("click",(e)=>{
+  const menu=$("#moreMenu");
+  if (!menu.hidden && !menu.contains(e.target) && e.target!==$("#moreBtn") && !$("#moreBtn").contains(e.target)) closeMoreMenu();
+});
+// Selecting the theme or view-mode item keeps the menu open (their own
+// handlers already run above); only Page-jump's Go button and Fullscreen
+// should close it, since those represent a completed action.
+$("#pageGoBtn").addEventListener("click", closeMoreMenu);
+$("#fullscreenBtn").onclick=()=>toggleFullscreen(true);
+$("#exitFullscreenBtn").onclick=()=>toggleFullscreen(false);
+$("#pageInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") goToPage(); });
+
+function handleWordTap(i){
+  Speech.cursor=i; highlight(i); markReadUpTo(i-1); UI.updateSeek(i); saveProgress(true);
+  if(!Speech.playing) Speech.play(true); else Speech.speakFrom(i,true);
+}
+
+/* ---------- highlights & notes ---------- */
+// One record covers both: a highlight is just a record with note:"". Presence
+// of non-empty note text is what shows the small note-icon marker. This
+// avoids a separate "type" field and the branching that would come with it.
+function wordIndexAtEvent(e){
+  const hit = document.elementFromPoint(e.clientX, e.clientY);
+  if (!hit) return null;
+  if (Reader.mode==="text"){
+    const span=hit.closest(".w"); if(!span) return null;
+    return parseInt(span.dataset.i,10);
+  }
+  const wrapper=hit.closest(".pdfpage"); if(!wrapper) return null;
+  const p=Number(wrapper.dataset.page);
+  const canvas=wrapper.querySelector("canvas"); if(!canvas) return null;
+  const rect=canvas.getBoundingClientRect();
+  const scale=Reader.pageDisplayScale[p] || (rect.width/(Reader.pagePtWidth[p]||612));
+  const px=(e.clientX-rect.left)/scale, py=(e.clientY-rect.top)/scale;
+  return Reader.wordIndexNearPoint(p, px, py);
+}
+
+const Annot = {
+  items:[], selecting:false, startIdx:null, endIdx:null, _selPreviewEl:null,
+
+  async loadForDoc(docId){
+    try{ this.items = await DB.annotationsForDoc(docId) || []; }catch(e){ this.items=[]; }
+    this.renderAll();
+  },
+  startSelection(idx){
+    if (!Reader.words[idx]) return;
+    this.selecting=true; this.startIdx=idx; this.endIdx=idx;
+    this._showSelectionOverlay(); this._showToolbar();
+  },
+  extendSelection(idx){
+    if (!this.selecting || !Reader.words[idx]) return;
+    if (Reader.mode==="pdf" && Reader.words[idx].page !== Reader.words[this.startIdx].page) return; // keep selection within one page in pdf mode
+    this.endIdx=idx;
+    this._showSelectionOverlay(); this._positionToolbar();
+  },
+  cancelSelection(){
+    this.selecting=false; this.startIdx=null; this.endIdx=null;
+    this._clearSelectionOverlay();
+    $("#annotToolbar").hidden=true;
+  },
+  range(){ if(this.startIdx==null||this.endIdx==null) return [0,-1]; return [Math.min(this.startIdx,this.endIdx), Math.max(this.startIdx,this.endIdx)]; },
+
+  _wordSpanBBox(a,b,page){
+    let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+    for(let i=a;i<=b;i++){ const w=Reader.words[i]; if(!w||w.x==null||(page!=null&&w.page!==page)) continue;
+      minX=Math.min(minX,w.x); maxX=Math.max(maxX,w.x+w.w); minY=Math.min(minY,w.y); maxY=Math.max(maxY,w.y+w.h); }
+    return minX===Infinity ? null : {x:minX,y:minY,w:maxX-minX,h:maxY-minY};
+  },
+  _showSelectionOverlay(){
+    this._clearSelectionOverlay();
+    const [a,b]=this.range();
+    if (Reader.mode==="pdf"){
+      const page=Reader.words[a].page; const wrapper=Reader.pageWrappers[page]; if(!wrapper) return;
+      const scale=Reader.pageDisplayScale[page]||(wrapper.clientWidth/(Reader.pagePtWidth[page]||612));
+      const bb=this._wordSpanBBox(a,b,page); if(!bb) return;
+      const elx=el("div"); elx.className="pdfannot sel-preview-pdf"; elx.dataset.color="yellow";
+      elx.style.left=(bb.x*scale)+"px"; elx.style.top=(bb.y*scale)+"px";
+      elx.style.width=(bb.w*scale)+"px"; elx.style.height=(bb.h*scale)+"px";
+      elx.style.outline="2px dashed #6a45ff";
+      wrapper.appendChild(elx); this._selPreviewEl=elx;
+    } else {
+      for(let i=a;i<=b;i++){ const w=Reader.words[i]; if(w&&w.span) w.span.classList.add("sel-preview"); }
+    }
+  },
+  _clearSelectionOverlay(){
+    if (this._selPreviewEl){ this._selPreviewEl.remove(); this._selPreviewEl=null; }
+    document.querySelectorAll(".w.sel-preview").forEach(s=>s.classList.remove("sel-preview"));
+  },
+  _showToolbar(){ $("#annotToolbar").hidden=false; this._positionToolbar(); },
+  _positionToolbar(){
+    const bar=$("#annotToolbar"); if(bar.hidden) return;
+    let rect=null;
+    if (Reader.mode==="pdf" && this._selPreviewEl) rect=this._selPreviewEl.getBoundingClientRect();
+    else { const [,b]=this.range(); const w=Reader.words[b]; if(w&&w.span) rect=w.span.getBoundingClientRect(); }
+    if (!rect) return;
+    const barW=bar.offsetWidth||220;
+    let left=rect.left+rect.width/2-barW/2;
+    left=Math.max(8,Math.min(left, window.innerWidth-barW-8));
+    let top=rect.top-56; if (top<8) top=rect.bottom+10;
+    bar.style.left=left+"px"; bar.style.top=top+"px";
+  },
+
+  async saveHighlight(color){
+    const [a,b]=this.range(); if(b<a) return;
+    const id=crypto.randomUUID?crypto.randomUUID():String(Date.now()+Math.random());
+    const rec={ id, docId:UI.activeId, page:(Reader.words[a]?Reader.words[a].page:null), startWord:a, endWord:b, color, note:"", createdAt:Date.now() };
+    try{ await DB.putAnnotation(rec); }catch(e){}
+    this.items.push(rec); this.cancelSelection(); this.renderAll();
+  },
+  openNoteEditor(existing){
+    const [selA,selB]=this.range();
+    const a=existing?existing.startWord:selA, b=existing?existing.endWord:selB;
+    if (b<a) return;
+    $("#noteModalTitle").textContent = existing ? "Edit note" : "Add note";
+    $("#noteModalQuote").textContent = Reader.textFrom(a,b).slice(0,180);
+    $("#noteText").value = existing ? (existing.note||"") : "";
+    $("#noteDeleteBtn").hidden = !existing;
+    const modal=$("#noteModal");
+    modal.dataset.editingId = existing ? existing.id : "";
+    modal.dataset.startWord = a; modal.dataset.endWord = b;
+    modal.dataset.color = existing ? existing.color : "blue";
+    modal.hidden=false;
+    setTimeout(()=>$("#noteText").focus(),50);
+  },
+  async saveNote(){
+    const modal=$("#noteModal");
+    const text=$("#noteText").value.trim();
+    const a=parseInt(modal.dataset.startWord,10), b=parseInt(modal.dataset.endWord,10);
+    const editingId=modal.dataset.editingId;
+    const id=editingId || (crypto.randomUUID?crypto.randomUUID():String(Date.now()+Math.random()));
+    const rec={ id, docId:UI.activeId, page:(Reader.words[a]?Reader.words[a].page:null), startWord:a, endWord:b, color:modal.dataset.color||"blue", note:text, createdAt:Date.now() };
+    try{ await DB.putAnnotation(rec); }catch(e){}
+    const idx=this.items.findIndex(x=>x.id===id);
+    if (idx>=0) this.items[idx]=rec; else this.items.push(rec);
+    modal.hidden=true; this.cancelSelection(); this.renderAll();
+  },
+  async deleteAnnotation(id){
+    try{ await DB.delAnnotation(id); }catch(e){}
+    this.items=this.items.filter(x=>x.id!==id);
+    this.renderAll();
+    $("#noteModal").hidden=true;
+  },
+
+  renderAll(){
+    document.querySelectorAll(".pdfannot:not(.sel-preview-pdf)").forEach(n=>n.remove());
+    document.querySelectorAll(".w.hl-yellow,.w.hl-green,.w.hl-pink,.w.hl-blue").forEach(s=>s.classList.remove("hl-yellow","hl-green","hl-pink","hl-blue"));
+    document.querySelectorAll(".note-icon").forEach(n=>n.remove());
+    this.items.forEach(a=>this.renderOne(a));
+  },
+  renderOne(a){
+    if (Reader.mode==="pdf"){
+      const wrapper=Reader.pageWrappers[a.page]; if(!wrapper || wrapper.dataset.rendered!=="1") return; // re-drawn when that page's canvas renders, see renderPageCanvas
+      const scale=Reader.pageDisplayScale[a.page]||(wrapper.clientWidth/(Reader.pagePtWidth[a.page]||612));
+      const bb=this._wordSpanBBox(a.startWord,a.endWord,a.page); if(!bb) return;
+      const rectEl=el("div"); rectEl.className="pdfannot"; rectEl.dataset.color=a.color;
+      rectEl.style.left=(bb.x*scale)+"px"; rectEl.style.top=(bb.y*scale)+"px";
+      rectEl.style.width=(bb.w*scale)+"px"; rectEl.style.height=(bb.h*scale)+"px";
+      rectEl.addEventListener("click",(e)=>{ e.stopPropagation(); Annot.openNoteEditor(a); });
+      wrapper.appendChild(rectEl);
+      if (a.note){
+        const marker=el("div"); marker.className="pdfannot note-marker";
+        marker.style.left=Math.max(0,bb.x*scale-8)+"px"; marker.style.top=(bb.y*scale-8)+"px";
+        marker.style.background = a.color==="yellow"?"#ffe066":a.color==="green"?"#8ce99a":a.color==="pink"?"#ffa8c5":"#8ecdf7";
+        marker.innerHTML='<svg viewBox="0 0 24 24"><path d="M4 4h16v12H8l-4 4V4z"/></svg>';
+        marker.addEventListener("click",(e)=>{ e.stopPropagation(); Annot.openNoteEditor(a); });
+        wrapper.appendChild(marker);
+      }
+    } else {
+      for(let i=a.startWord;i<=a.endWord;i++){ const w=Reader.words[i]; if(w&&w.span) w.span.classList.add("hl-"+a.color); }
+      if (a.note){
+        const w=Reader.words[a.startWord];
+        if (w&&w.span&&w.span.parentNode){
+          const icon=el("span","note-icon");
+          icon.innerHTML='<svg viewBox="0 0 24 24"><path d="M4 4h16v12H8l-4 4V4z"/></svg>';
+          icon.addEventListener("click",(e)=>{ e.stopPropagation(); Annot.openNoteEditor(a); });
+          w.span.parentNode.insertBefore(icon, w.span);
+        }
+      }
+    }
+  }
+};
+
+let _lpTimer=null, _lpStartX=0, _lpStartY=0, _lpFired=false, _suppressNextClick=false, _suppressClickT=null;
+const LP_MS=480, LP_MOVE_TOL=10;
+function suppressNextClick(){
+  _suppressNextClick=true;
+  // Safety net: if for any reason the click event never actually fires
+  // (so our own click handler never gets a chance to consume this flag),
+  // it self-clears shortly after -- a stale "true" here would otherwise
+  // silently break every future tap-to-read.
+  clearTimeout(_suppressClickT);
+  _suppressClickT=setTimeout(()=>{ _suppressNextClick=false; }, 400);
+}
+$("#content").addEventListener("pointerdown",(e)=>{
+  if (e.pointerType==="mouse" && e.button!==0) return;
+  _lpFired=false; _lpStartX=e.clientX; _lpStartY=e.clientY;
+  clearTimeout(_lpTimer);
+  _lpTimer=setTimeout(()=>{
+    _lpFired=true;
+    const idx=wordIndexAtEvent(e);
+    if (idx!=null) Annot.startSelection(idx);
+  }, LP_MS);
+});
+$("#content").addEventListener("pointermove",(e)=>{
+  if (!_lpTimer) return;
+  if (Math.hypot(e.clientX-_lpStartX, e.clientY-_lpStartY) > LP_MOVE_TOL){ clearTimeout(_lpTimer); _lpTimer=null; }
+});
+$("#content").addEventListener("pointerup",(e)=>{
+  clearTimeout(_lpTimer); _lpTimer=null;
+  if (_lpFired){ suppressNextClick(); return; } // long-press already started a selection; don't also trigger tap-to-read
+  if (Annot.selecting){
+    const idx=wordIndexAtEvent(e);
+    if (idx!=null) Annot.extendSelection(idx);
+    suppressNextClick();
+  }
+});
+
+$("#annotToolbar").querySelectorAll(".swatch").forEach(btn=>{
+  btn.addEventListener("click",()=>Annot.saveHighlight(btn.dataset.color));
+});
+$("#annotNoteBtn").onclick=()=>{ $("#annotToolbar").hidden=true; Annot.openNoteEditor(null); };
+$("#annotCancelBtn").onclick=()=>Annot.cancelSelection();
+$("#noteCancelBtn").onclick=()=>{ $("#noteModal").hidden=true; Annot.cancelSelection(); };
+$("#noteSaveBtn").onclick=()=>Annot.saveNote();
+$("#noteDeleteBtn").onclick=()=>{ const id=$("#noteModal").dataset.editingId; if(id) Annot.deleteAnnotation(id); };
+
+function fmtAnnotSnippet(a){
+  try{ return Reader.textFrom(a.startWord, Math.min(a.endWord, a.startWord+25)).slice(0,140); }catch(e){ return ""; }
+}
+function openAnnotList(){
+  const body=$("#annotListBody"); body.innerHTML="";
+  const items=[...Annot.items].sort((x,y)=>x.startWord-y.startWord);
+  if (!items.length){ body.innerHTML='<div class="empty">No highlights or notes yet — long-press a word to start one.</div>'; }
+  items.forEach(a=>{
+    const row=el("div","annotRow");
+    const dot=el("div","swatchDot"); dot.style.background = a.color==="yellow"?"#ffe066":a.color==="green"?"#8ce99a":a.color==="pink"?"#ffa8c5":"#8ecdf7";
+    const bodyEl=el("div","annotBody");
+    const quote=el("div","annotQuote"); quote.textContent=fmtAnnotSnippet(a);
+    bodyEl.appendChild(quote);
+    if (a.note){ const noteEl=el("div","annotNote"); noteEl.textContent=a.note; bodyEl.appendChild(noteEl); }
+    const del=el("button","annotDel"); del.textContent="✕"; del.title="Delete";
+    del.addEventListener("click",(e)=>{ e.stopPropagation(); Annot.deleteAnnotation(a.id); openAnnotList(); });
+    row.appendChild(dot); row.appendChild(bodyEl); row.appendChild(del);
+    row.addEventListener("click",()=>{
+      $("#annotListModal").hidden=true;
+      Speech.jump(a.startWord);
+    });
+    body.appendChild(row);
+  });
+  $("#annotListModal").hidden=false;
+}
+$("#annotListBtn").onclick=()=>{ closeMoreMenu(); openAnnotList(); };
+const baseName=(n)=>(n||"book").replace(/\.[^.]+$/,"").replace(/[\\/:*?"<>|]+/g,"_").slice(0,80)||"book";
+async function exportAnnotations(){
+  const items=[...Annot.items].sort((x,y)=>x.startWord-y.startWord);
+  if(!items.length){ await dlgAlert("Nothing to export","This book has no highlights or notes yet."); return; }
+  const fmt=await dlgChoose("Export highlights & notes",[{label:"Markdown (.md)",value:"md"},{label:"Plain text (.txt)",value:"txt"}]); if(!fmt) return;
+  const title=currentDoc?currentDoc.name:"Book"; let out="";
+  if(fmt==="md") out+="# Highlights & notes — "+title+"\n\n";
+  else out+="Highlights & notes — "+title+"\n\n";
+  items.forEach((a,i)=>{
+    const q=Reader.textFrom(a.startWord,a.endWord).trim(); const pg=a.page?" (page "+a.page+")":"";
+    if(fmt==="md"){ out+="> "+q+"\n"; out+="\n*"+a.color+" highlight"+pg+"*\n"; if(a.note) out+="\n**Note:** "+a.note.replace(/\n/g,"\n> ")+"\n"; out+="\n---\n\n"; }
+    else { out+=(i+1)+". \""+q+"\""+pg+" ["+a.color+"]\n"; if(a.note) out+="   Note: "+a.note.replace(/\n/g,"\n   ")+"\n"; out+="\n"; }
+  });
+  await saveAndReport(baseName(title)+"-highlights."+fmt, fmt==="md"?"text/markdown":"text/plain", new Blob([out],{type:"text/plain;charset=utf-8"}));
+}
+$("#annotExportBtn").onclick=()=>{ exportAnnotations(); };
+$("#saveTextBtn").onclick=async()=>{
+  closeMoreMenu();
+  if(!Reader.words.length){ await dlgAlert("No text","Open a book with readable text first."); return; }
+  let out="", line=[];
+  Reader.words.forEach(w=>{ if(!w.skip) line.push(w.text); if(w.blockEnd){ if(line.length) out+=line.join(" ")+"\n\n"; line=[]; } });
+  if(line.length) out+=line.join(" ")+"\n";
+  await saveAndReport(baseName(currentDoc&&currentDoc.name)+".txt","text/plain",new Blob([out],{type:"text/plain;charset=utf-8"}));
+};
+
+/* ---------- back button (called from MainActivity.onBackPressed) ---------- */
+window.__handleBack=function(){
+  if(!$("#dlg").hidden){ dlgClose(null); return true; }
+  if(!$("#noteModal").hidden){ $("#noteCancelBtn").click(); return true; }
+  if(!$("#annotListModal").hidden){ $("#annotListModal").hidden=true; return true; }
+  if(Annot.selecting){ Annot.cancelSelection(); return true; }
+  if(!$("#moreMenu").hidden){ closeMoreMenu(); return true; }
+  if(document.body.classList.contains("reading-fullscreen")){ toggleFullscreen(false); return true; }
+  if(Shelf.visible){
+    if(Shelf.cwd){ Shelf.up(); return true; }
+    if(Shelf.overReader && UI.activeId!=null){ Shelf.hide(); return true; }
+    return false;                      // shelf root: let the app exit
+  }
+  if(UI.activeId!=null){               // reader -> shelf (in the book's own folder)
+    if(Speech.playing) Speech.pause(); else saveProgress(true);
+    DB.getMeta(UI.activeId).then(m=>{ Shelf.cwd=(m&&m.folderId)||null; Shelf.show(false); });
+    return true;
+  }
+  return false;
+};
+$("#annotListCloseBtn").onclick=()=>{ $("#annotListModal").hidden=true; };
+
+$("#content").addEventListener("click",(e)=>{
+  if (_suppressNextClick){ _suppressNextClick=false; clearTimeout(_suppressClickT); e.stopPropagation(); return; }
+  const span=e.target.closest(".w"); if(!span) return; const i=parseInt(span.dataset.i,10);
+  handleWordTap(i);
+});
+
+// Returns true if a tap doesn't land reasonably close to any actual word --
+// used to let a tap on blank reading-area space toggle fullscreen without
+// stealing taps meant for tap-to-read.
+function isBlankAreaTap(e){
+  const hit=document.elementFromPoint(e.clientX, e.clientY);
+  if (Reader.mode==="text") return !(hit && hit.closest(".w"));
+  const wrapper = hit && hit.closest(".pdfpage");
+  if (!wrapper) return true; // tap landed outside any page entirely
+  const p=Number(wrapper.dataset.page);
+  const canvas=wrapper.querySelector("canvas"); if(!canvas) return true;
+  const rect=canvas.getBoundingClientRect();
+  const scale=Reader.pageDisplayScale[p] || (rect.width/(Reader.pagePtWidth[p]||612));
+  const px=(e.clientX-rect.left)/scale, py=(e.clientY-rect.top)/scale;
+  let bestDist=Infinity;
+  for (let i=0;i<Reader.words.length;i++){
+    const w=Reader.words[i]; if (w.page!==p || w.x==null) continue;
+    const dx=(w.x+w.w/2)-px, dy=(w.y+w.h/2)-py;
+    const dist=Math.sqrt(dx*dx+dy*dy);
+    if (dist<bestDist) bestDist=dist;
+  }
+  const THRESH_PT=28; // roughly two line-heights of typical body text
+  return bestDist>THRESH_PT;
+}
+function toggleFullscreen(force){
+  const on = force!==undefined ? force : !document.body.classList.contains("reading-fullscreen");
+  document.body.classList.toggle("reading-fullscreen", on);
+  $("#exitFullscreenBtn").hidden=!on;
+  if (on){ closeMoreMenu(); }
+}
+$("#reader").addEventListener("click",(e)=>{
+  if (_suppressNextClick) return; // already consumed/being handled by the content click listener above
+  if (Annot.selecting) return; // a tap during an active selection shouldn't also toggle fullscreen
+  if (!Reader.words.length) return; // no document open yet
+  if (!isBlankAreaTap(e)) return; // landed on/near a word -- let tap-to-read own this one
+  toggleFullscreen();
+});
+const seekEl=$("#seek");
+seekEl.addEventListener("input",()=>{ const i=parseInt(seekEl.value,10); highlight(i);
+  const pct=Reader.words.length?Math.round((i/(Reader.words.length-1))*100):0;
+  $("#posLabel").textContent=pct+"%"; $("#wordHint").textContent=`word ${i+1} of ${Reader.words.length}`; });
+seekEl.addEventListener("change",()=>Speech.seekTo(parseInt(seekEl.value,10),true));
+$("#playBtn").onclick=()=>Speech.toggle();
+$("#nextBtn").onclick=()=>Speech.next();
+$("#prevBtn").onclick=()=>Speech.prev();
+$("#rate").oninput=(e)=>{ $("#rateVal").textContent=parseFloat(e.target.value).toFixed(1)+"×"; if(Speech.playing) Speech.speakFrom(Speech.cursor); };
+$("#pitch").oninput=(e)=>{ $("#pitchVal").textContent=parseFloat(e.target.value).toFixed(1); if(Speech.playing) Speech.speakFrom(Speech.cursor); };
+$("#voiceSel").onchange=()=>{ if(Speech.playing) Speech.speakFrom(Speech.cursor); };
+$("#fontSize").oninput=(e)=>{ $("#content").style.setProperty("--fs",e.target.value+"px"); };
+document.addEventListener("keydown",(e)=>{
+  if(e.target.tagName==="INPUT"||e.target.tagName==="SELECT") return;
+  if(e.code==="Space"){ e.preventDefault(); if(!$("#playBtn").disabled) Speech.toggle(); }
+  else if(e.code==="ArrowRight") Speech.next(); else if(e.code==="ArrowLeft") Speech.prev();
+});
+$("#menuBtn").onclick=()=>{ if(Shelf.visible){ if(UI.activeId!=null) Shelf.hide(); } else Shelf.show(true); };
+$("#addBtn").onclick=()=>$("#fileInput").click();
+$("#welcomeAdd").onclick=()=>$("#fileInput").click();
+$("#fileInput").onchange=(e)=>{ importFiles(e.target.files); e.target.value=""; };
+["dragover","drop"].forEach(ev=>document.addEventListener(ev,(e)=>{ e.preventDefault(); if(ev==="drop"&&e.dataTransfer.files.length) importFiles(e.dataTransfer.files); }));
+window.addEventListener("beforeunload",()=>saveProgress(true));
+if(window.speechSynthesis){ Speech.loadVoices(); speechSynthesis.onvoiceschanged=()=>Speech.loadVoices(); }
+else $("#voiceSel").innerHTML="<option>No TTS available</option>";
+setInterval(()=>{ if(Speech.playing&&speechSynthesis.speaking&&!speechSynthesis.paused){ speechSynthesis.pause(); speechSynthesis.resume(); } },12000);
+Shelf.show(false);
+
+window.__LoudReader = { Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
+} /* end appInit */
+</script>
+</body>
+</html>

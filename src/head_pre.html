@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<script>
+/* ===== Real viewport height tracking =====
+   CSS height:100%/100vh can be computed against a "layout viewport" that
+   doesn't match what's actually visible on an Android WebView, especially
+   in an edge-to-edge fullscreen Activity with hidden system bars. If body
+   ends up taller than the true visible area, the WHOLE PAGE becomes
+   scrollable as one document (instead of just the intended inner #reader
+   scroll region) -- which means anything meant to be pinned in place,
+   including a position:fixed footer, only becomes reachable by dragging
+   the entire page, and content can appear to run off the bottom of the
+   screen. The Visual Viewport API reports the actual visible size
+   reliably; this keeps a CSS variable in sync with it so layout is sized
+   against reality rather than a potentially-wrong static unit.
+   Runs before any other script so first paint already uses the right value. */
+(function(){
+  function setAppHeight(){
+    var h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+    document.documentElement.style.setProperty("--app-height", h + "px");
+  }
+  setAppHeight();
+  window.addEventListener("resize", setAppHeight);
+  window.addEventListener("orientationchange", setAppHeight);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", setAppHeight);
+})();
+</script>
+<title>Loud Reader — read your documents aloud</title>
+<script>
+/* ===== Native-TTS polyfill for window.speechSynthesis =====
+   Android's WebView component (unlike the Chrome browser app) has never
+   implemented the Web Speech Synthesis API -- window.speechSynthesis is
+   undefined in every WebView build (open Chromium bug 487255, filed 2015,
+   still unresolved). This shim bridges to Android's on-device
+   android.speech.tts.TextToSpeech via the AndroidTTS JavaScript interface
+   registered by MainActivity, so nothing below this block needs to change.
+   Must run before any other script -- kept as the very first thing in <head>. */
+(function(){
+  if (window.speechSynthesis) return;      // real API already present (e.g. desktop testing) -- don't override
+  if (typeof AndroidTTS === "undefined") return; // not running inside the wrapper -- leave unsupported as-is
+
+  var _voices = [];
+  var _current = null;   // { id, utter } for the in-flight utterance
+  var _nextId = 1;
+  var _pauseTimer = null;
+  var _paused = false;
+  var _speaking = false;
+
+  function Voice(name, lang, isDefault){
+    this.name = name; this.lang = lang; this.default = !!isDefault;
+    this.localService = true; this.voiceURI = name;
+  }
+
+  function refreshVoices(){
+    try {
+      var raw = JSON.parse(AndroidTTS.getVoices());
+      _voices = raw.map(function(v){ return new Voice(v.name, v.lang, v.default); });
+    } catch(e){ _voices = []; }
+    if (typeof synth.onvoiceschanged === "function") { try { synth.onvoiceschanged({}); } catch(e){} }
+  }
+
+  function SpeechSynthesisUtterance(text){
+    this.text = text || ""; this.voice = null; this.lang = "";
+    this.rate = 1; this.pitch = 1; this.volume = 1;
+    this.onstart = null; this.onend = null; this.onerror = null; this.onboundary = null;
+  }
+  window.SpeechSynthesisUtterance = SpeechSynthesisUtterance;
+
+  var synth = {
+    onvoiceschanged: null,
+    get speaking(){ return _speaking; },
+    get paused(){ return _paused; },
+    get pending(){ return false; },
+    getVoices: function(){ return _voices; },
+    speak: function(utter){
+      if (_current) {
+        var old = _current; _current = null;
+        if (typeof old.utter.onerror === "function") { try { old.utter.onerror({error:"interrupted"}); } catch(e){} }
+      }
+      if (_pauseTimer) { clearTimeout(_pauseTimer); _pauseTimer = null; }
+      _paused = false;
+      var id = String(_nextId++);
+      _current = { id: id, utter: utter };
+      var voiceName = utter.voice ? utter.voice.name : "";
+      _speaking = true;
+      try { AndroidTTS.speak(id, utter.text, voiceName, utter.rate || 1, utter.pitch || 1); }
+      catch(e){ _speaking = false; if (typeof utter.onerror === "function") utter.onerror({error:"synthesis-failed"}); }
+    },
+    cancel: function(){
+      if (_pauseTimer) { clearTimeout(_pauseTimer); _pauseTimer = null; }
+      if (_current) {
+        var old = _current; _current = null; _speaking = false; _paused = false;
+        try { AndroidTTS.stop(); } catch(e){}
+        if (typeof old.utter.onerror === "function") { try { old.utter.onerror({error:"canceled"}); } catch(e){} }
+      }
+    },
+    pause: function(){
+      // Debounced on purpose: the app's own 12s keep-alive timer calls
+      // pause() immediately followed by resume() to work around a
+      // *Chrome-specific* stall bug. Native TextToSpeech doesn't have that
+      // bug, so if resume() lands within this window we never touch native
+      // audio at all -- avoids an audible stutter every 12 seconds.
+      if (!_speaking || _paused || _pauseTimer) return;
+      _pauseTimer = setTimeout(function(){
+        _pauseTimer = null; _paused = true; _speaking = false;
+        try { AndroidTTS.stop(); } catch(e){}
+      }, 80);
+    },
+    resume: function(){
+      if (_pauseTimer) { clearTimeout(_pauseTimer); _pauseTimer = null; return; }
+      _paused = false;
+    }
+  };
+  window.speechSynthesis = synth;
+
+  window.__ttsOnRangeStart = function(id, start, end){
+    if (!_current || _current.id !== id) return;
+    var u = _current.utter;
+    if (typeof u.onboundary === "function") u.onboundary({ name: "word", charIndex: start, charLength: end - start });
+  };
+  window.__ttsOnDone = function(id){
+    if (!_current || _current.id !== id) return;
+    var u = _current.utter; _current = null; _speaking = false;
+    if (typeof u.onend === "function") u.onend({});
+  };
+  window.__ttsOnError = function(id){
+    if (!_current || _current.id !== id) return;
+    var u = _current.utter; _current = null; _speaking = false;
+    if (typeof u.onerror === "function") u.onerror({error:"synthesis-failed"});
+  };
+  window.__ttsOnReady = function(){ refreshVoices(); };
+
+  try { refreshVoices(); } catch(e){}  // harmless no-op if native isn't initialized yet; __ttsOnReady fires again once it is
+})();
+</script>

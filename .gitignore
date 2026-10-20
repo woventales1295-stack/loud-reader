@@ -1,0 +1,3 @@
+apk_build/bin/
+apk_build/assets/
+*.keystore

@@ -1,0 +1,208 @@
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171b21; --panel2:#1e232b; --line:#2a313b;
+    --text:#e7ecf3; --muted:#9aa6b6; --accent:#5b9dff; --accent2:#7c5cff;
+    --read:#3a4658; --hl:#ffd54a; --hl-text:#101216; --danger:#ff6b6b; --ok:#2ba36b;
+    --radius:14px; --shadow:0 10px 30px rgba(0,0,0,.35);
+  }
+  :root[data-theme="light"]{
+    --bg:#f3f5f9; --panel:#ffffff; --panel2:#f0f3f8; --line:#e2e7ef;
+    --text:#1a2230; --muted:#5d6b80; --accent:#2f6bff; --accent2:#6a45ff;
+    --read:#c9d4e6; --hl:#ffdf5e; --hl-text:#20160a; --danger:#e2483d; --ok:#1f9257;
+    --shadow:0 10px 30px rgba(20,40,80,.12);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%; height:var(--app-height, 100%)}
+  body{margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;}
+  header{display:flex; align-items:center; gap:12px; padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--line); z-index:20;}
+  header .brand{font-weight:700; font-size:18px; letter-spacing:.2px; display:flex; align-items:center; gap:8px}
+  header .brand .dot{width:12px;height:12px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  header .spacer{flex:1}
+  button, select, .btn{font:inherit; color:var(--text); background:var(--panel2); border:1px solid var(--line);
+    border-radius:10px; padding:8px 12px; cursor:pointer; transition:.15s ease; -webkit-tap-highlight-color:transparent;}
+  button:hover,.btn:hover{border-color:var(--accent)}
+  button:active{transform:translateY(1px)}
+  button:disabled{opacity:.4;cursor:default}
+  .btn-accent{background:linear-gradient(135deg,var(--accent),var(--accent2)); border:none; color:#fff; font-weight:600}
+  .icon-btn{display:inline-flex;align-items:center;gap:6px}
+  .layout{flex:1; display:flex; min-height:0; position:relative}
+  aside{width:300px; flex-shrink:0; background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; transition:margin-left .25s ease;}
+  aside.hidden{margin-left:-300px}
+  aside h2{margin:0; padding:14px 16px 8px; font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted)}
+  #libList li{display:flex; align-items:center; gap:10px; padding:10px; border-radius:12px; cursor:pointer; border:1px solid transparent;}
+  #libList li:hover{background:var(--panel2)}
+  #libList li.active{background:var(--panel2); border-color:var(--accent)}
+  #libList .ficon{width:34px;height:34px;flex-shrink:0;border-radius:8px;display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff}
+  .ficon.pdf{background:#e5484d}.ficon.epub{background:#2ba36b}.ficon.docx{background:#2f6bff}
+  #libList .meta{min-width:0;flex:1}
+  #libList .name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #libList .sub{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px}
+  #libList .pill{font-size:11px;padding:1px 7px;border-radius:20px;background:var(--panel);border:1px solid var(--line)}
+  #libList .pill.progress{color:var(--ok);border-color:var(--ok)}
+  #libList .del{opacity:.5;padding:4px 8px;font-size:12px}
+  #libList .del:hover{opacity:1;border-color:var(--danger);color:var(--danger)}
+  .empty{padding:20px 16px;color:var(--muted);font-size:14px}
+  main{flex:1; display:flex; flex-direction:column; min-height:0}
+  #docHeader{padding:12px 22px 8px; border-bottom:1px solid var(--line); background:var(--panel)}
+  #docTitle{font-size:15px;font-weight:600}
+  #status{font-size:12px;color:var(--muted);min-height:16px}
+  #ocrBar{display:none; align-items:center; gap:12px; margin-top:8px; padding:10px 12px; background:var(--panel2); border:1px solid var(--line); border-radius:12px; font-size:13px;}
+  #ocrBar.show{display:flex}
+  #ocrBar .grow{flex:1}
+  #ocrBar progress{width:160px;height:8px}
+  #ocrBar select{padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--text); font-size:13px}
+  #moreMenu{position:fixed; top:60px; right:12px; z-index:50; background:var(--panel); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); padding:8px; display:flex; flex-direction:column; gap:2px; min-width:230px; max-width:calc(100vw - 24px)}
+  #moreMenu[hidden]{display:none}
+  .menu-item{display:flex; align-items:center; gap:10px; width:100%; box-sizing:border-box; padding:11px 12px; border-radius:9px; border:none; background:transparent; color:var(--text); font-size:14px; text-align:left; cursor:pointer}
+  .menu-item:hover{background:var(--panel2)}
+  .menu-item svg{width:18px; height:18px; fill:currentColor; flex:none}
+  .menu-item-row{display:flex; align-items:center; gap:8px; padding:8px 12px; font-size:13px; color:var(--muted)}
+  .menu-item-row[hidden]{display:none}
+  #pageNav input{width:56px; padding:6px 8px; text-align:center}
+  body.reading-fullscreen header, body.reading-fullscreen #docHeader, body.reading-fullscreen footer, body.reading-fullscreen #moreMenu, body.reading-fullscreen #drawer, body.reading-fullscreen #scrim{display:none}
+  #exitFullscreenBtn{position:fixed; bottom:18px; right:18px; z-index:60; opacity:.6; box-shadow:var(--shadow)}
+  #exitFullscreenBtn[hidden]{display:none}
+
+  #annotToolbar{position:fixed; z-index:70; display:flex; align-items:center; gap:6px; background:var(--panel); border:1px solid var(--line); border-radius:24px; padding:6px; box-shadow:var(--shadow)}
+  #annotToolbar[hidden]{display:none}
+  #annotToolbar .swatch{width:30px; height:30px; border-radius:50%; border:2px solid rgba(0,0,0,.15); padding:0}
+  #annotToolbar button:not(.swatch){width:34px; height:34px; border-radius:50%; border:none; background:var(--panel2); color:var(--text); display:grid; place-items:center; padding:0}
+  #annotToolbar svg{width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:0}
+  #annotNoteBtn svg{fill:currentColor}
+
+  #noteModal,#annotListModal{position:fixed; inset:0; z-index:80; background:rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; padding:20px}
+  #noteModal[hidden],#annotListModal[hidden]{display:none}
+  .modalCard{background:var(--panel); border-radius:16px; padding:18px; width:100%; max-width:420px; max-height:80vh; display:flex; flex-direction:column; gap:10px; box-shadow:var(--shadow)}
+  .modalCardLarge{max-width:520px}
+  .modalCard h3{margin:0; font-size:17px}
+  #noteModalQuote{font-size:13px; color:var(--muted); font-style:italic; max-height:60px; overflow:auto; border-left:3px solid var(--accent); padding-left:10px}
+  #noteText{width:100%; box-sizing:border-box; resize:vertical; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--panel2); color:var(--text); font:inherit}
+  .modalActions{display:flex; align-items:center; gap:8px}
+  .modalActions .grow{flex:1}
+  .modalActions button.danger{color:var(--danger); background:transparent; border:1px solid var(--danger)}
+  #annotListBody{overflow:auto; display:flex; flex-direction:column; gap:8px}
+  .annotRow{display:flex; align-items:flex-start; gap:10px; padding:10px; border-radius:10px; background:var(--panel2); cursor:pointer}
+  .annotRow .swatchDot{width:12px; height:12px; border-radius:50%; margin-top:4px; flex:none}
+  .annotRow .annotBody{flex:1; min-width:0}
+  .annotRow .annotQuote{font-size:13px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
+  .annotRow .annotNote{font-size:14px; margin-top:2px}
+  .annotRow .annotDel{border:none; background:transparent; color:var(--muted); flex:none}
+  #annotListBody .empty{color:var(--muted); text-align:center; padding:20px 0}
+
+  /* Persistent highlight/note rendering -- PDF canvas mode overlay rects */
+  .pdfannot{position:absolute; pointer-events:auto; border-radius:2px; opacity:.55}
+  .pdfannot[data-color="yellow"]{background:#ffe066}
+  .pdfannot[data-color="green"]{background:#8ce99a}
+  .pdfannot[data-color="pink"]{background:#ffa8c5}
+  .pdfannot[data-color="blue"]{background:#8ecdf7}
+  .pdfannot.note-marker{position:absolute; width:20px; height:20px; opacity:1; border-radius:50%; display:grid; place-items:center; box-shadow:var(--shadow)}
+  .pdfannot.note-marker svg{width:12px; height:12px; fill:#20160a}
+
+  /* Persistent highlight/note rendering -- text reflow mode */
+  .w.hl-yellow{background:#ffe066; color:#20160a}
+  .w.hl-green{background:#8ce99a; color:#0f2c1a}
+  .w.hl-pink{background:#ffa8c5; color:#3a0f1f}
+  .w.hl-blue{background:#8ecdf7; color:#0c2436}
+  .note-icon{display:inline-flex; vertical-align:middle; width:16px; height:16px; margin:0 2px; cursor:pointer}
+  .note-icon svg{width:16px; height:16px; fill:var(--accent)}
+  #content p.aux{opacity:.55; font-size:.82em; font-style:italic}
+  #reader{flex:1; overflow:auto; padding:24px clamp(16px,6vw,120px) 150px; scroll-behavior:smooth}
+  #content{max-width:820px; margin:0 auto; font-size:var(--fs,20px); line-height:1.9}
+  #content p{margin:0 0 1.1em}
+  .w{border-radius:5px; padding:0 1px; cursor:pointer; transition:background .08s linear,color .08s linear}
+  .w:hover{background:var(--panel2)}
+  .w.read{color:var(--muted)}
+  .w.speaking{background:var(--hl); color:var(--hl-text); box-shadow:0 0 0 3px var(--hl)}
+  .w.sel-preview{background:rgba(106,69,255,.25); box-shadow:0 0 0 2px rgba(106,69,255,.5)}
+  .pdfpage{position:relative; width:100%; height:0; margin:0 0 16px; background:#fff; border-radius:6px; box-shadow:var(--shadow); overflow:hidden}
+  .pdfpage canvas{position:absolute; top:0; left:0; width:100%; height:100%; display:block}
+  html[data-theme="dark"] .pdfpage canvas{filter:invert(.92) hue-rotate(180deg)}
+  .pdfhl{position:absolute; display:none; background:rgba(255,213,74,.42); border-radius:2px; pointer-events:none; transition:left .1s linear,top .1s linear}
+  .pdfpagenum{position:absolute; bottom:6px; right:8px; font-size:11px; color:#fff; background:rgba(0,0,0,.45); padding:2px 7px; border-radius:20px; pointer-events:none}
+  .welcome{max-width:640px;margin:5vh auto;text-align:center;color:var(--muted)}
+  .welcome h1{color:var(--text);font-size:26px;margin-bottom:8px}
+  .welcome .big{display:inline-block;margin-top:18px;padding:16px 26px;font-size:17px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;border-radius:14px;font-weight:600;cursor:pointer;box-shadow:var(--shadow)}
+  .welcome ul{text-align:left;display:inline-block;margin-top:22px;line-height:2}
+  footer{position:fixed; left:0; right:0; bottom:0; z-index:15; background:color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter:blur(10px); border-top:1px solid var(--line); padding:10px clamp(12px,4vw,40px) calc(10px + env(safe-area-inset-bottom));}
+  .seek{display:flex;align-items:center;gap:12px}
+  #seek{flex:1; accent-color:var(--accent); height:6px}
+  .seek .time{font-size:12px;color:var(--muted);min-width:52px;text-align:right;font-variant-numeric:tabular-nums}
+  .controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px}
+  .transport{display:flex;align-items:center;gap:8px}
+  .round{width:44px;height:44px;border-radius:50%;display:grid;place-items:center;padding:0}
+  #playBtn{width:56px;height:56px}
+  .knob{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+  .knob input[type=range]{width:104px;accent-color:var(--accent2)}
+  .knob .val{min-width:38px;color:var(--text);font-variant-numeric:tabular-nums}
+  .grow{flex:1}
+  select.voice{max-width:190px}
+  svg{width:22px;height:22px;fill:currentColor;display:block}
+  #playBtn svg{width:26px;height:26px}
+  .hint{font-size:12px;color:var(--muted)}
+  #boot{position:absolute;inset:0;display:grid;place-items:center;background:var(--bg);z-index:50;color:var(--muted);font-size:14px}
+  @media (max-height:480px){
+    header{padding:6px 12px; gap:8px}
+    header .round{width:34px; height:34px}
+    header .round svg{width:18px; height:18px}
+    #addBtn{padding:6px 12px; font-size:13px}
+    #docHeader{padding:6px 16px 4px}
+    #docTitle{font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+    #status{font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+    footer{padding:4px clamp(10px,3vw,30px) calc(4px + env(safe-area-inset-bottom))}
+    .controls{margin-top:4px; gap:6px}
+    .controls .round{width:36px; height:36px}
+    .knob{font-size:12px}
+    .knob.hide-sm{display:none}
+    #reader{padding-top:12px; padding-bottom:110px}
+  }
+  @media (max-width:760px){
+    aside{position:fixed; top:0; bottom:0; z-index:30; box-shadow:var(--shadow)}
+    .knob.hide-sm{display:none}
+    #reader{padding:20px 16px 176px}
+  }
+  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:25;display:none}
+  .scrim.show{display:block}
+
+  /* ---- v2: shelf / folders / dialogs ---- */
+  header .brand{white-space:nowrap} #addBtn{white-space:nowrap}
+  #shelf{position:absolute; inset:0; z-index:30; background:var(--bg); overflow:auto; display:flex; flex-direction:column}
+  #shelf[hidden]{display:none}
+  .shelfTop{display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:2}
+  .shelfTop .grow{flex:1}
+  #crumbs{display:flex; align-items:center; flex-wrap:wrap; gap:2px; font-size:14px; min-width:0}
+  #crumbs button{background:transparent; border:none; padding:4px 6px; border-radius:8px; color:var(--muted); font-weight:600}
+  #crumbs button:last-child{color:var(--text)}
+  #crumbs .sep{color:var(--muted)}
+  .shelfTop select{padding:6px 8px; font-size:13px}
+  #libList{list-style:none; margin:0; padding:10px 12px 24px; flex:1}
+  #libList li{display:flex; align-items:center; gap:12px; padding:10px; border-radius:12px; cursor:pointer; border:1px solid transparent}
+  #libList li:hover{background:var(--panel2)}
+  #libList li.active{background:var(--panel2); border-color:var(--accent)}
+  #libList .ficon{width:38px;height:38px;flex-shrink:0;border-radius:9px;display:grid;place-items:center;font-size:10px;font-weight:700;color:#fff;background:#6b7788}
+  #libList .ficon.folder{background:linear-gradient(135deg,#f5a623,#f08c00); font-size:18px}
+  #libList .meta{min-width:0;flex:1}
+  #libList .name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #libList .sub{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px}
+  #libList .pill{font-size:11px;padding:1px 7px;border-radius:20px;background:var(--panel);border:1px solid var(--line)}
+  #libList .pill.progress{color:var(--ok);border-color:var(--ok)}
+  #libList .more{padding:4px 10px; font-size:18px; line-height:1; background:transparent; border:none; color:var(--muted)}
+  .ficon.pdf{background:#e5484d!important}.ficon.epub{background:#2ba36b!important}.ficon.docx{background:#2f6bff!important}
+  .ficon.mobi,.ficon.azw,.ficon.azw3,.ficon.prc{background:#f08c00!important}
+  .ficon.txt,.ficon.md,.ficon.markdown{background:#6b7788!important}
+  .ficon.fb2{background:#8e5be8!important}.ficon.html,.ficon.htm,.ficon.xhtml{background:#0ca5b0!important}
+  .ficon.cbz,.ficon.cbr,.ficon.zip,.ficon.rar{background:#d6336c!important}
+  .empty{padding:20px 16px;color:var(--muted);font-size:14px;text-align:center}
+  #dlg{position:fixed; inset:0; z-index:100; background:rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; padding:20px}
+  #dlg[hidden]{display:none}
+  #dlgMsg{color:var(--muted); font-size:14px; white-space:pre-wrap}
+  #dlgMsg:empty{display:none}
+  #dlgInput{width:100%; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--panel2); color:var(--text); font:inherit}
+  #dlgInput[hidden]{display:none}
+  #dlgChoices{display:flex; flex-direction:column; gap:6px; overflow:auto; max-height:46vh}
+  #dlgChoices button{text-align:left}
+  #dlgChoices button.danger,.danger{color:var(--danger)}
+  #dlgChoices:empty{display:none}
+  body.reading-fullscreen #shelf{display:none}
+</style>

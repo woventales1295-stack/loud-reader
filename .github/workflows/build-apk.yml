@@ -1,0 +1,118 @@
+name: Build Loud Reader v2 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KS_PASS: "e335163903d8c0348612f3b6"
+      KS_ALIAS: "loudreaderkey"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK components (platform + build-tools)
+        run: |
+          set -e
+          SDK="$ANDROID_HOME"
+          SDKMGR="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMGR" --licenses > /dev/null || true
+          "$SDKMGR" "platforms;android-33" "build-tools;33.0.2" "platform-tools"
+          echo "BUILD_TOOLS=$SDK/build-tools/33.0.2" >> "$GITHUB_ENV"
+          echo "ANDROID_JAR=$SDK/platforms/android-33/android.jar" >> "$GITHUB_ENV"
+          echo "PLATFORM_TOOLS=$SDK/platform-tools" >> "$GITHUB_ENV"
+
+      - name: Generate signing keystore (fresh identity — v1 keystore unavailable)
+        run: |
+          keytool -genkeypair -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+            -keystore loudreader.keystore -storepass "$KS_PASS" -keypass "$KS_PASS" \
+            -dname "CN=Loud Reader, OU=Devise, O=Devise, L=City, ST=State, C=IN" -noprompt
+
+      - name: Rule check — no lambdas / method references (runbook 0.1)
+        run: |
+          if grep -rnE '\) *->|::' apk_build/src --include=*.java; then
+            echo "::error::lambda or method reference found in Java source"; exit 1
+          fi
+          echo "clean: no lambdas/method refs"
+
+      - name: Assemble assets/index.html from src/ parts
+        run: python3 tools/build_html.py apk_build/assets/index.html
+
+      - name: Generate R.java from resources
+        working-directory: apk_build
+        run: |
+          rm -rf bin && mkdir -p bin/classes
+          "$BUILD_TOOLS/aapt" package -f -m -J src -M AndroidManifest.xml -S res -I "$ANDROID_JAR"
+
+      - name: Compile Java
+        working-directory: apk_build
+        run: |
+          javac -proc:none -source 8 -target 8 -classpath "$ANDROID_JAR" -d bin/classes \
+            src/com/devise/loudreader/app/MainActivity.java src/com/devise/loudreader/app/R.java
+          find bin/classes -name '*.class' | grep -q . || { echo "::error::no .class files produced"; exit 1; }
+
+      - name: Convert to DEX (d8)
+        working-directory: apk_build
+        run: |
+          "$BUILD_TOOLS/d8" --release --min-api 29 --output bin $(find bin/classes -name '*.class')
+          [ -s bin/classes.dex ] || { echo "::error::no classes.dex produced"; exit 1; }
+
+      - name: Verify no invokedynamic leaked into DEX (runbook 0.4)
+        working-directory: apk_build
+        run: |
+          "$PLATFORM_TOOLS/dexdump" -d bin/classes.dex > /tmp/dexdump.txt
+          if grep -iE 'invoke-custom|invoke-polymorphic' /tmp/dexdump.txt; then
+            echo "::error::invokedynamic found in DEX — a lambda/method-ref slipped through"; exit 1
+          fi
+          echo "DEX clean — no invokedynamic bytecode"
+
+      - name: Package manifest + resources + assets
+        working-directory: apk_build
+        run: |
+          "$BUILD_TOOLS/aapt" package -f -M AndroidManifest.xml -S res -A assets -I "$ANDROID_JAR" -F bin/unsigned.apk
+
+      - name: Inject classes.dex into the APK
+        working-directory: apk_build/bin
+        run: zip -j unsigned.apk classes.dex
+
+      - name: Align before signing (runbook 0.5)
+        working-directory: apk_build
+        run: |
+          "$BUILD_TOOLS/zipalign" -f -p 4 bin/unsigned.apk bin/aligned.apk
+          "$BUILD_TOOLS/zipalign" -c -v 4 bin/aligned.apk | tail -3
+
+      - name: Sign with apksigner
+        working-directory: apk_build
+        run: |
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks ../loudreader.keystore --ks-pass "pass:$KS_PASS" \
+            --ks-key-alias "$KS_ALIAS" --key-pass "pass:$KS_PASS" \
+            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+            --out bin/LoudReader_v2.apk bin/aligned.apk
+
+      - name: Verify signature + dump badging
+        working-directory: apk_build
+        run: |
+          "$BUILD_TOOLS/apksigner" verify --verbose bin/LoudReader_v2.apk
+          "$BUILD_TOOLS/aapt" dump badging bin/LoudReader_v2.apk | head -6
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoudReader_v2-apk
+          path: apk_build/bin/LoudReader_v2.apk
+
+      - name: Upload signing keystore (BACK THIS UP — needed for future updates)
+        uses: actions/upload-artifact@v4
+        with:
+          name: loudreader-keystore
+          path: loudreader.keystore

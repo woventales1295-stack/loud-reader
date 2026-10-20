@@ -1,0 +1,138 @@
+
+</head>
+<body>
+<header>
+  <button id="menuBtn" class="round" title="Library"><svg viewBox="0 0 24 24"><path d="M3 6h18v2H3zM3 11h18v2H3zM3 16h18v2H3z"/></svg></button>
+  <div class="brand"><span class="dot"></span> Loud Reader</div>
+  <div class="spacer"></div>
+  <button id="addBtn" class="btn-accent icon-btn" title="Add files to the current folder"><svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg> Add files</button>
+  <button id="moreBtn" class="round" title="More options"><svg viewBox="0 0 24 24"><path d="M12 8a2 2 0 100-4 2 2 0 000 4zm0 6a2 2 0 100-4 2 2 0 000 4zm0 6a2 2 0 100-4 2 2 0 000 4z"/></svg></button>
+  <input id="fileInput" type="file" accept=".pdf,.epub,.docx,.mobi,.azw,.azw3,.prc,.fb2,.txt,.md,.markdown,.html,.htm,.xhtml,.cbz,.cbr,.zip,.rar,*/*" multiple hidden />
+</header>
+
+<div id="moreMenu" hidden>
+  <button id="themeBtn" class="menu-item"></button>
+  <div id="viewModeRow" class="menu-item-row" hidden><button id="viewModeBtn" class="menu-item"></button></div>
+  <div id="pageNav" class="menu-item-row" hidden>
+    <span>Page</span>
+    <input id="pageInput" type="number" min="1" step="1" value="1" />
+    <span>of <span id="pageTotal">1</span></span>
+    <button id="pageGoBtn">Go</button>
+  </div>
+  <button id="fullscreenBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM4 14h2v4h4v2H4v-6zm16 0h-2v4h-4v2h6v-6z"/></svg> Fullscreen reading</button>
+  <button id="saveTextBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zM12 3v10.2l3.6-3.6L17 11l-5 5-5-5 1.4-1.4L11 13.2V3h1z"/></svg> Save text as .txt</button>
+  <button id="annotListBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M4 4h16v2H4V4zm0 5h16v2H4V9zm0 5h10v2H4v-2zm0 5h10v2H4v-2z"/></svg> Highlights &amp; notes</button>
+</div>
+
+<div class="layout">
+  <section id="shelf" hidden>
+    <div class="shelfTop">
+      <nav id="crumbs"></nav>
+      <span class="grow"></span>
+      <select id="sortSel" title="Sort"><option value="recent">Recent</option><option value="name">Name</option><option value="progress">Progress</option></select>
+      <button id="newFolderBtn" class="icon-btn"><svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2h-8l-2-2zm6 8h-3v3h-2v-3H8v-2h3V7h2v3h3v2z"/></svg> Folder</button>
+    </div>
+    <ul id="libList"></ul>
+  </section>
+  <main>
+    <div id="docHeader">
+      <div id="docTitle">No document open</div>
+      <div id="status">Add a book to begin.</div>
+      <div id="ocrBar">
+        <span id="ocrMsg"></span>
+        <progress id="ocrProg" max="100" value="0" hidden></progress>
+        <span class="grow"></span>
+        <select id="ocrLangOrder" title="Which language dominates this document? Tesseract's recognition is biased toward whichever is listed first.">
+          <option value="hin+eng">Hindi-primary</option>
+          <option value="eng+hin">English-primary</option>
+        </select>
+        <button id="ocrRun" class="btn-accent">Run OCR</button>
+        <button id="ocrCancel" hidden>Cancel</button>
+        <button id="ocrDismiss">Dismiss</button>
+      </div>
+    </div>
+    <div id="reader">
+      <div id="content">
+        <div class="welcome">
+          <h1>📖🔊 Read anything out loud</h1>
+          <p>Import your documents and let your device narrate them — with the current word highlighted as it speaks. Everything, including OCR for scanned PDFs and comics, runs completely offline.</p>
+          <button class="big" id="welcomeAdd">Add your first document</button>
+          <ul>
+            <li>✅ PDF, EPUB, MOBI/AZW3, DOCX, FB2, TXT, Markdown, HTML, CBZ/CBR — no file-size limit</li>
+            <li>✅ Organise books into folders</li>
+            <li>✅ Play / pause, speed &amp; tone (pitch) control</li>
+            <li>✅ Skip forward / back by sentence</li>
+            <li>✅ Tap any word to start reading there</li>
+            <li>✅ Drag the slider to scrub through the text</li>
+            <li>✅ Remembers where you left off in each book</li>
+            <li>✅ Built-in OCR for scanned PDFs &amp; comics — no internet ever</li>
+            <li>✅ Export your highlights &amp; notes</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <footer>
+      <div class="seek"><input id="seek" type="range" min="0" max="0" value="0" step="1" disabled /><div class="time"><span id="posLabel">0%</span></div></div>
+      <div class="controls">
+        <div class="transport">
+          <button id="prevBtn" class="round" title="Previous sentence" disabled><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zM20 6v12l-9-6z"/></svg></button>
+          <button id="playBtn" class="round btn-accent" title="Play" disabled><svg id="playIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+          <button id="nextBtn" class="round" title="Next sentence" disabled><svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM4 6l9 6-9 6z"/></svg></button>
+        </div>
+        <div class="knob"><span>Voice</span><select id="voiceSel" class="voice"></select></div>
+        <div class="knob"><span>Speed</span><input id="rate" type="range" min="0.5" max="2.5" step="0.1" value="1" /><span class="val" id="rateVal">1.0×</span></div>
+        <div class="knob hide-sm"><span>Tone</span><input id="pitch" type="range" min="0" max="2" step="0.1" value="1" /><span class="val" id="pitchVal">1.0</span></div>
+        <div class="knob hide-sm"><span>Size</span><input id="fontSize" type="range" min="16" max="34" step="1" value="20" /></div>
+        <div class="grow"></div>
+        <span class="hint" id="wordHint"></span>
+      </div>
+    </footer>
+  </main>
+</div>
+
+<button id="exitFullscreenBtn" class="round" hidden title="Exit fullscreen"><svg viewBox="0 0 24 24"><path d="M9 3H3v6h2V5h4V3zm12 0h-6v2h4v4h2V3zM5 15H3v6h6v-2H5v-4zm14 4h-4v2h6v-6h-2v4z"/></svg></button>
+
+<div id="annotToolbar" hidden>
+  <button class="swatch" data-color="yellow" style="background:#ffe066"></button>
+  <button class="swatch" data-color="green" style="background:#8ce99a"></button>
+  <button class="swatch" data-color="pink" style="background:#ffa8c5"></button>
+  <button class="swatch" data-color="blue" style="background:#8ecdf7"></button>
+  <button id="annotNoteBtn" title="Add note"><svg viewBox="0 0 24 24"><path d="M4 4h16v12H8l-4 4V4z"/></svg></button>
+  <button id="annotCancelBtn" title="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+</div>
+
+<div id="noteModal" hidden>
+  <div class="modalCard">
+    <h3 id="noteModalTitle">Add note</h3>
+    <div id="noteModalQuote"></div>
+    <textarea id="noteText" rows="5" placeholder="Type your note…"></textarea>
+    <div class="modalActions">
+      <button id="noteDeleteBtn" class="danger" hidden>Delete</button>
+      <span class="grow"></span>
+      <button id="noteCancelBtn">Cancel</button>
+      <button id="noteSaveBtn" class="btn-accent">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="annotListModal" hidden>
+  <div class="modalCard modalCardLarge">
+    <h3>Highlights &amp; notes</h3>
+    <div id="annotListBody"></div>
+    <div class="modalActions"><button id="annotExportBtn">Export…</button><span class="grow"></span><button id="annotListCloseBtn">Close</button></div>
+  </div>
+</div>
+
+<div id="dlg" hidden>
+  <div class="modalCard">
+    <h3 id="dlgTitle"></h3>
+    <div id="dlgMsg"></div>
+    <input id="dlgInput" type="text" hidden />
+    <div id="dlgChoices"></div>
+    <div class="modalActions"><span class="grow"></span><button id="dlgCancel">Cancel</button><button id="dlgOk" class="btn-accent">OK</button></div>
+  </div>
+</div>
+
+<div id="boot">Loading Loud Reader…</div>
+
+<!-- ===== Bundled libraries (base64, decoded at startup — fully offline) ===== -->
