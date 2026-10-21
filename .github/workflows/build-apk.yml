@@ -5,6 +5,9 @@ on:
   push:
     branches: [ main ]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -131,3 +134,19 @@ jobs:
           path: |
             loudreader.keystore
             keystore-password.txt
+
+      # Actions artifacts are served from Azure blob storage, which this
+      # pulling session's network cannot reach. Commit the build outputs
+      # straight into the repo too, as a reachable fallback.
+      - name: Commit build outputs to repo (artifact-fetch workaround)
+        run: |
+          mkdir -p dist
+          cp apk_build/bin/LoudReader_v2.apk dist/
+          cp loudreader.keystore dist/
+          cp keystore-password.txt dist/
+          git config user.name "Loud Reader build"
+          git config user.email "woventales1295@gmail.com"
+          git add dist/LoudReader_v2.apk dist/keystore-password.txt
+          git add -f dist/loudreader.keystore
+          git diff --cached --quiet && echo "nothing to commit" || git commit -m "Add built APK + signing keystore [skip ci]"
+          git push origin HEAD:main
