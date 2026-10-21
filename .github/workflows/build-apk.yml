@@ -9,7 +9,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      KS_PASS: "e335163903d8c0348612f3b6"
       KS_ALIAS: "loudreaderkey"
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +32,10 @@ jobs:
 
       - name: Generate signing keystore (fresh identity — v1 keystore unavailable)
         run: |
+          KS_PASS="$(openssl rand -hex 12)"
+          echo "::add-mask::$KS_PASS"
+          echo "KS_PASS=$KS_PASS" >> "$GITHUB_ENV"
+          echo "$KS_PASS" > keystore-password.txt
           keytool -genkeypair -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
             -keystore loudreader.keystore -storepass "$KS_PASS" -keypass "$KS_PASS" \
             -dname "CN=Loud Reader, OU=Devise, O=Devise, L=City, ST=State, C=IN" -noprompt
@@ -69,7 +72,17 @@ jobs:
       - name: Verify no invokedynamic leaked into DEX (runbook 0.4)
         working-directory: apk_build
         run: |
-          "$PLATFORM_TOOLS/dexdump" -d bin/classes.dex > /tmp/dexdump.txt
+          DEXDUMP="$(find "$ANDROID_HOME" -name dexdump -type f 2>/dev/null | head -1)"
+          if [ -n "$DEXDUMP" ]; then
+            echo "using dexdump: $DEXDUMP"
+            "$DEXDUMP" -d bin/classes.dex > /tmp/dexdump.txt
+          else
+            echo "dexdump not found in SDK — falling back to baksmali"
+            pip install --break-system-packages --quiet smali || pip install --quiet smali
+            rm -rf /tmp/dex_verify
+            baksmali d bin/classes.dex -o /tmp/dex_verify
+            find /tmp/dex_verify -name '*.smali' -exec cat {} + > /tmp/dexdump.txt
+          fi
           if grep -iE 'invoke-custom|invoke-polymorphic' /tmp/dexdump.txt; then
             echo "::error::invokedynamic found in DEX — a lambda/method-ref slipped through"; exit 1
           fi
@@ -115,4 +128,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: loudreader-keystore
-          path: loudreader.keystore
+          path: |
+            loudreader.keystore
+            keystore-password.txt
