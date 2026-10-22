@@ -33,15 +33,22 @@ jobs:
           echo "ANDROID_JAR=$SDK/platforms/android-33/android.jar" >> "$GITHUB_ENV"
           echo "PLATFORM_TOOLS=$SDK/platform-tools" >> "$GITHUB_ENV"
 
-      - name: Generate signing keystore (fresh identity — v1 keystore unavailable)
+      - name: Set up signing keystore (reuse the committed one so updates install in place)
         run: |
-          KS_PASS="$(openssl rand -hex 12)"
+          if [ -f dist/loudreader.keystore ] && [ -f dist/keystore-password.txt ]; then
+            echo "reusing existing keystore from dist/ -- updates will install over the previous APK"
+            cp dist/loudreader.keystore loudreader.keystore
+            KS_PASS="$(cat dist/keystore-password.txt)"
+          else
+            echo "no existing keystore found in dist/ -- generating a new signing identity"
+            KS_PASS="$(openssl rand -hex 12)"
+            keytool -genkeypair -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -keystore loudreader.keystore -storepass "$KS_PASS" -keypass "$KS_PASS" \
+              -dname "CN=Loud Reader, OU=Devise, O=Devise, L=City, ST=State, C=IN" -noprompt
+          fi
           echo "::add-mask::$KS_PASS"
           echo "KS_PASS=$KS_PASS" >> "$GITHUB_ENV"
           echo "$KS_PASS" > keystore-password.txt
-          keytool -genkeypair -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
-            -keystore loudreader.keystore -storepass "$KS_PASS" -keypass "$KS_PASS" \
-            -dname "CN=Loud Reader, OU=Devise, O=Devise, L=City, ST=State, C=IN" -noprompt
 
       - name: Rule check — no lambdas / method references (runbook 0.1)
         run: |

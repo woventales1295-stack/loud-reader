@@ -121,7 +121,37 @@ const Native = {
     const uri=AndroidBridge.finishSave();
     return uri ? {ok:true, uri} : {ok:false};
   },
-  open(uri, mime){ try{ return this.has && AndroidBridge.openUri(uri, mime); }catch(e){ return false; } }
+  open(uri, mime){ try{ return this.has && AndroidBridge.openUri(uri, mime); }catch(e){ return false; } },
+  // Lets the user import a whole folder (with subfolders) from the device.
+  // Resolves to an array of {id,name,path,size} (path includes the picked
+  // folder's own name as its first segment, matching webkitRelativePath's
+  // convention) or null if unsupported/cancelled.
+  pickFolder(){
+    if(!this.has || typeof AndroidBridge.pickFolder!=="function") return Promise.resolve(null);
+    return new Promise((resolve)=>{
+      window.__onFolderManifest=(manifest)=>{ window.__onFolderManifest=null; window.__onFolderCancelled=null; resolve(manifest||[]); };
+      window.__onFolderCancelled=()=>{ window.__onFolderManifest=null; window.__onFolderCancelled=null; resolve(null); };
+      try{ AndroidBridge.pickFolder(); }catch(e){ window.__onFolderManifest=null; window.__onFolderCancelled=null; resolve(null); }
+    });
+  },
+  // Pulls one manifested folder-import entry's bytes (chunked, same CH as
+  // saveBlob) and wraps them as a real File so it can flow through the same
+  // importFiles() pipeline as a normally-picked file.
+  async readImportedFile(entry){
+    const CH=3*65536;
+    const parts=[]; let offset=0;
+    for(;;){
+      let b64; try{ b64=AndroidBridge.readImportChunk(entry.id, offset, CH); }catch(e){ b64=""; }
+      if(!b64) break;
+      const bin=atob(b64); const bytes=new Uint8Array(bin.length);
+      for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+      parts.push(bytes); offset+=bytes.length;
+      if(bytes.length<CH) break;
+    }
+    const file=new File(parts, entry.name, {});
+    try{ Object.defineProperty(file,"_relPath",{value:entry.path||entry.name,enumerable:false}); }catch(e){ file._relPath=entry.path||entry.name; }
+    return file;
+  }
 };
 async function saveAndReport(name, mime, blob){
   let r; try{ r=await Native.saveBlob(name, mime, blob); }catch(e){ r={ok:false}; }
@@ -138,13 +168,17 @@ const DB = (() => {
   function open(){
     if (dbp) return dbp;
     dbp = new Promise((res, rej) => {
-      const r = indexedDB.open("loud-reader", 3);
+      const r = indexedDB.open("loud-reader", 4);
       r.onupgradeneeded = () => {
         const db = r.result;
         if (!db.objectStoreNames.contains("docs")) db.createObjectStore("docs", { keyPath:"id" });
         if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath:"id" });
         if (!db.objectStoreNames.contains("annotations")){
           const store = db.createObjectStore("annotations", { keyPath:"id" });
+          store.createIndex("byDoc", "docId", { unique:false });
+        }
+        if (!db.objectStoreNames.contains("ink")){
+          const store = db.createObjectStore("ink", { keyPath:"id" });
           store.createIndex("byDoc", "docId", { unique:false });
         }
       };
@@ -175,6 +209,20 @@ const DB = (() => {
     async delAnnotationsForDoc(docId){
       const items = await this.annotationsForDoc(docId);
       return Promise.all(items.map(a=>this.delAnnotation(a.id)));
+    },
+    putInk:(s)=>run("ink","readwrite",st=>st.put(s)),
+    delInk:(id)=>run("ink","readwrite",st=>st.delete(id)),
+    async inkForDoc(docId){
+      const db = await open();
+      return new Promise((res,rej)=>{
+        const idx = db.transaction("ink","readonly").objectStore("ink").index("byDoc");
+        const rq = idx.getAll(docId);
+        rq.onsuccess=()=>res(rq.result); rq.onerror=()=>rej(rq.error);
+      });
+    },
+    async delInkForDoc(docId){
+      const items = await this.inkForDoc(docId);
+      return Promise.all(items.map(s=>this.delInk(s.id)));
     },
   };
 })();
@@ -207,6 +255,33 @@ const Theme = {
 };
 $("#themeBtn").onclick=()=>{ Theme.toggle(); closeMoreMenu(); };
 Theme.init();
+
+/* ---------- read-aloud toggle: lets the app be used for silent/direct reading ---------- */
+const ReadAloud = {
+  enabled:true,
+  async init(){
+    let saved=null;
+    try{ const m=await DB.getMeta(Theme.SETTINGS_ID); saved=m&&m.readAloud; }catch(e){}
+    this.enabled = saved!==false; // default on, matching existing behavior
+    this.apply();
+  },
+  apply(){
+    const btn=$("#readAloudBtn"); if(!btn) return;
+    btn.innerHTML = this.enabled
+      ? '<svg viewBox="0 0 24 24"><path d="M5 9v6h4l5 5V4L9 9H5zm13.5 3c0-1.77-1-3.29-2.5-4.03v8.05c1.5-.73 2.5-2.25 2.5-4.02z"/></svg> Read aloud: On'
+      : '<svg viewBox="0 0 24 24"><path d="M5 9v6h4l5 5V4L9 9H5zm9.4 3 2-2-1.4-1.4-2 2-2-2L9.6 10l2 2-2 2L11 15.4l2-2 2 2 1.4-1.4z"/></svg> Read aloud: Off (direct reading)';
+    btn.title = this.enabled ? "Turn off to read silently" : "Turn on to have books read aloud";
+    UI.enableControls(UI.activeId!=null && Reader.words.length>0);
+  },
+  async toggle(){
+    this.enabled=!this.enabled;
+    if(!this.enabled && Speech.playing) Speech.pause();
+    this.apply();
+    try{ await DB.setMeta(Theme.SETTINGS_ID,{readAloud:this.enabled}); }catch(e){}
+  }
+};
+$("#readAloudBtn").onclick=()=>{ ReadAloud.toggle(); };
+ReadAloud.init(); // load the saved on/off state -- without this it silently resets to "on" every launch
 async function parsePDF(blob, onProgress, ctx){
   const pdf = await pdfjsLib.getDocument({ data: await blob.arrayBuffer() }).promise;
   if (ctx) ctx.pages = pdf.numPages;
@@ -1044,6 +1119,7 @@ const Reader = {
     if (this._io){ this._io.disconnect(); this._io=null; }
     if (this.pdfProxy){ try{ this.pdfProxy.destroy(); }catch(e){} this.pdfProxy=null; }
     this.pageWrappers={};
+    if (typeof Ink!=="undefined") Ink._drawing=null; // old canvases are gone with the DOM rebuild
   },
 
   wordIndexNearPoint(page, px, py){
@@ -1096,6 +1172,7 @@ async function renderPageCanvas(wrapper, pageNum){
     Reader.pageDisplayScale[pageNum] = displayScale;
     wrapper.dataset.rendered="1";
     if (typeof Annot!=="undefined") Annot.items.filter(a=>a.page===pageNum).forEach(a=>Annot.renderOne(a));
+    if (typeof Ink!=="undefined") Ink.redrawPage(wrapper, pageNum);
   } catch(e){ console.error("PDF page render failed", pageNum, e); }
   finally { wrapper.dataset.rendering="0"; }
 }
@@ -1151,7 +1228,7 @@ const Speech = {
     u.onerror=(ev)=>{ if(ev.error!=="interrupted"&&ev.error!=="canceled") setStatus("Speech error: "+ev.error); };
     this.utter=u; this.synth.speak(u);
   },
-  play(force){ if(!Reader.words.length) return; this.playing=true; UI.setPlaying(true); Native.keepOn(true);
+  play(force){ if(!Reader.words.length || !ReadAloud.enabled) return; this.playing=true; UI.setPlaying(true); Native.keepOn(true);
     if(this.synth.paused&&this.synth.speaking) this.synth.resume(); else this.speakFrom(this.cursor||0, force); },
   pause(){ this.playing=false; UI.setPlaying(false); Native.keepOn(false); if(this.synth.speaking) this.synth.pause(); saveProgress(true); },
   toggle(){ this.playing?this.pause():this.play(); },
@@ -1169,13 +1246,37 @@ let lastHi=-1;
 // sensibly in both the normal layout (header/footer visible, #reader is
 // shorter) and fullscreen (header/footer hidden, #reader nearly fills the
 // screen) -- fixed pixel margins tuned for one don't translate to the other.
+//
+// Auto-scroll is coalesced through one rAF slot and only fires when the
+// target actually needs to move into view. Calling el.scrollIntoView every
+// single word (every ~200-500ms while reading, faster at higher speeds)
+// used to start a brand-new smooth-scroll animation on top of whatever the
+// previous word's scroll was still doing, which reads as a jittery, stepped
+// scroll rather than one continuous glide. Coalescing to the latest target
+// and skipping the call entirely when already comfortably in view fixes that.
+let _scrollRAF=0, _scrollTarget=null;
+function smoothScrollIntoViewIfNeeded(target){
+  _scrollTarget=target;
+  if(_scrollRAF) return;
+  _scrollRAF=requestAnimationFrame(()=>{
+    _scrollRAF=0;
+    const t=_scrollTarget; _scrollTarget=null;
+    if(!t || !t.isConnected) return;
+    const container=t.closest("#reader")||$("#reader");
+    const cr=container.getBoundingClientRect(), tr=t.getBoundingClientRect();
+    const margin=Math.max(40, cr.height*0.18);
+    if(tr.top<cr.top+margin || tr.bottom>cr.bottom-margin){
+      t.scrollIntoView({block:"center",behavior:"smooth"});
+    }
+  });
+}
 function highlight(i){
   if(i===lastHi) return;
   if (Reader.mode==="pdf"){ highlightPdf(i); lastHi=i; return; }
   if(lastHi>=0 && Reader.words[lastHi] && Reader.words[lastHi].span) Reader.words[lastHi].span.classList.remove("speaking");
   const w=Reader.words[i];
   if(w && w.span){ w.span.classList.add("speaking"); w.span.classList.remove("read");
-    w.span.scrollIntoView({block:"nearest",behavior:"smooth"});
+    smoothScrollIntoViewIfNeeded(w.span);
   }
   lastHi=i;
 }
@@ -1184,6 +1285,7 @@ function markReadUpTo(i){
   for(let k=0;k<=i&&k<Reader.words.length;k++){ const w=Reader.words[k]; if(w.span){ const c=w.span.classList; c.remove("speaking"); c.add("read"); } }
   for(let k=i+1;k<Reader.words.length;k++){ const w=Reader.words[k]; if(w.span) w.span.classList.remove("read"); }
 }
+let _lastHlBox=null; // {page,left,top} of the previously shown .pdfhl box, for the snap-vs-glide decision below
 function highlightPdf(i){
   const w=Reader.words[i]; if(!w || w.page==null || w.x==null) return;
   Object.keys(Reader.pageWrappers).forEach(p=>{
@@ -1193,10 +1295,25 @@ function highlightPdf(i){
   const positionAndShow=()=>{
     const scale=Reader.pageDisplayScale[w.page] || (wrapper.clientWidth/(Reader.pagePtWidth[w.page]||612));
     const hl=wrapper.querySelector(".pdfhl");
-    hl.style.left=(w.x*scale)+"px"; hl.style.top=(w.y*scale)+"px";
-    hl.style.width=(Math.max(w.w,4)*scale)+"px"; hl.style.height=(Math.max(w.h,4)*scale)+"px";
+    const left=w.x*scale, top=w.y*scale;
+    const width=Math.max(w.w,4)*scale, height=Math.max(w.h,4)*scale;
+    // A CSS-transitioned move reads as a natural, legible glide between two
+    // nearby words (same line, or wrapping to the next) but as a distracting
+    // box flying across the page for a big jump (a seek, skip-sentence, or
+    // a tap far away) -- so those snap straight to the new spot instead of
+    // animating through everything in between.
+    const prev=_lastHlBox;
+    const bigJump = !prev || prev.page!==w.page || Math.hypot(left-prev.left, top-prev.top) > height*4;
+    // Toggled before the position changes: "noglide" turns the CSS transition
+    // off so a big jump snaps instantly, and stays off until a later small
+    // move re-enables it -- so a run of big jumps (fast seeking) never
+    // animates either.
+    hl.classList.toggle("noglide", bigJump);
+    hl.style.left=left+"px"; hl.style.top=top+"px";
+    hl.style.width=width+"px"; hl.style.height=height+"px";
     hl.style.display="block";
-    hl.scrollIntoView({block:"nearest",behavior:"smooth"});
+    _lastHlBox={page:w.page,left,top};
+    smoothScrollIntoViewIfNeeded(hl);
   };
   if (wrapper.dataset.rendered==="1") positionAndShow();
   else renderPageCanvas(wrapper, w.page).then(positionAndShow);
@@ -1212,7 +1329,11 @@ function saveProgress(force){
 const UI = {
   activeId:null,
   setPlaying(on){ $("#playIcon").innerHTML=on?'<path d="M6 5h4v14H6zM14 5h4v14h-4z"/>':'<path d="M8 5v14l11-7z"/>'; $("#playBtn").title=on?"Pause":"Play"; },
-  enableControls(on){ ["#playBtn","#prevBtn","#nextBtn","#seek"].forEach(s=>$(s).disabled=!on); },
+  enableControls(on){
+    const ttsOn = on && (typeof ReadAloud==="undefined" || ReadAloud.enabled);
+    ["#playBtn","#prevBtn","#nextBtn","#voiceSel","#rate","#pitch"].forEach(s=>{ const e=$(s); if(e) e.disabled=!ttsOn; });
+    $("#seek").disabled=!on; // scrubbing/position-marking still works without read-aloud
+  },
   updateSeek(wordIdx){ $("#seek").value=wordIdx;
     const pct=Reader.words.length?Math.round((wordIdx/(Reader.words.length-1))*100):0;
     $("#posLabel").textContent=pct+"%"; $("#wordHint").textContent=`word ${wordIdx+1} of ${Reader.words.length}`; },
@@ -1222,6 +1343,7 @@ const UI = {
 /* ---------- shelf: library home screen with folders ---------- */
 const Shelf = {
   cwd:null, visible:false, overReader:false, sort:"recent",
+  selectMode:false, selected:new Set(),
   async _load(){
     const [docs,metas]=await Promise.all([DB.allDocs(),DB.allMeta()]);
     const metaById={}; metas.forEach(m=>metaById[m.id]=m);
@@ -1281,15 +1403,68 @@ const Shelf = {
       const pc=pctOf(d); if(pc>0){ const pill=el("span","pill progress"); pill.textContent=pc+"%"; sub.appendChild(pill); }
       if(d.ocrText){ const pill=el("span","pill"); pill.textContent="OCR"; sub.appendChild(pill); }
       meta.append(nm,sub);
-      const more=el("button","more"); more.textContent="⋯"; more.title="Book options";
-      more.onclick=(e)=>{ e.stopPropagation(); this.bookMenu(d); };
-      li.append(ic,meta,more); li.onclick=()=>openDoc(d.id); list.appendChild(li);
+      if(this.selectMode){
+        const chk=el("div","checkmark"+(this.selected.has(d.id)?" checked":""));
+        li.classList.add("selectableItem");
+        if(this.selected.has(d.id)) li.classList.add("selected");
+        li.append(chk,ic,meta);
+        li.onclick=()=>{ this.toggleSelect(d.id); this.render(); };
+      } else {
+        const more=el("button","more"); more.textContent="⋯"; more.title="Book options";
+        more.onclick=(e)=>{ e.stopPropagation(); this.bookMenu(d); };
+        li.append(ic,meta,more); li.onclick=()=>openDoc(d.id);
+      }
+      list.appendChild(li);
     });
+  },
+  toggleSelect(id){
+    if(this.selected.has(id)) this.selected.delete(id); else this.selected.add(id);
+    this.updateSelectBar();
+  },
+  updateSelectBar(){ $("#selectCount").textContent=this.selected.size+" selected"; },
+  enterSelectMode(){
+    this.selectMode=true; this.selected.clear();
+    $("#selectBar").hidden=false; $("#selectModeBtn").classList.add("active");
+    this.updateSelectBar(); this.render();
+  },
+  exitSelectMode(){
+    this.selectMode=false; this.selected.clear();
+    $("#selectBar").hidden=true; $("#selectModeBtn").classList.remove("active");
+    this.render();
+  },
+  async moveSelected(){
+    if(!this.selected.size) return;
+    const {folders}=await this._load();
+    const label=(f)=>this.chain(folders,f.id).map(x=>x.name).join(" / ");
+    const opts=[{label:"📚 Library (top level)",value:"__root"}];
+    folders.slice().sort((a,b)=>naturalCmp(label(a),label(b))).forEach(f=>opts.push({label:"📁 "+label(f),value:f.id}));
+    opts.push({label:"＋ New folder…",value:"__new"});
+    let c=await dlgChoose("Move "+this.selected.size+" item(s) to",opts); if(c==null) return;
+    if(c==="__new"){ c=await this.newFolder(this.cwd); if(!c) return; }
+    const target=c==="__root"?null:c;
+    for(const id of this.selected) await DB.setMeta(id,{folderId:target});
+    this.exitSelectMode();
   },
   async newFolder(parent){
     const name=(await dlgPrompt("New folder","","Folder name")||"").trim(); if(!name) return null;
     const id="folder:"+uid(); await DB.setMeta(id,{kind:"folder",name,parent:parent==null?null:parent,createdAt:Date.now()});
     return id;
+  },
+  // Non-interactive version of newFolder, used by folder import: walks/creates
+  // a chain of nested folders (segs, e.g. ["Sci-Fi","Asimov"]) under parentId,
+  // reusing any that already exist by name at each level, and returns the leaf id.
+  async ensureFolderPath(parentId, segs){
+    let cur=parentId;
+    for(const name of segs){
+      if(!name) continue;
+      const {folders}=await this._load();
+      const existing=folders.find(f=>f.name===name && (f.parent||null)===(cur||null));
+      if(existing){ cur=existing.id; continue; }
+      const id="folder:"+uid();
+      await DB.setMeta(id,{kind:"folder",name,parent:cur==null?null:cur,createdAt:Date.now()});
+      cur=id;
+    }
+    return cur;
   },
   async folderMenu(f){
     const c=await dlgChoose(f.name,[{label:"Rename",value:"rename"},{label:"Delete folder (books are kept)",value:"del",danger:true}]);
@@ -1323,8 +1498,9 @@ const Shelf = {
   async deleteBook(d){
     if(!await dlgConfirm("Remove book?","Remove “"+d.name+"” from your library? Its highlights and notes are deleted too.","Remove")) return;
     if(UI.activeId===d.id) closeCurrentDoc();
-    await Promise.all([DB.delDoc(d.id),DB.delMeta(d.id),DB.delAnnotationsForDoc(d.id)]);
+    await Promise.all([DB.delDoc(d.id),DB.delMeta(d.id),DB.delAnnotationsForDoc(d.id),DB.delInkForDoc(d.id)]);
     if(comicCache.id===d.id){ comicCache.id=null; comicCache.entries=null; }
+    this.selected.delete(d.id); this.updateSelectBar();
     await this.render();
   }
 };
@@ -1342,20 +1518,60 @@ function closeCurrentDoc(){
   if(!Shelf.visible) Shelf.show(false);
 }
 
-async function importFiles(fileList){
+// opts.targetFolderId overrides Shelf.cwd as the destination (used by folder
+// import, which fans a single picked tree out across several folders).
+// opts.silent skips the per-batch dialogs/auto-open/status line -- the caller
+// (importFolder) reports a single combined summary once all batches are in.
+async function importFiles(fileList, opts){
+  opts=opts||{};
   const all=[...fileList];
   const files=all.filter(f=>ALL_EXTS.includes(extOf(f.name)));
   const skipped=all.filter(f=>!ALL_EXTS.includes(extOf(f.name)));
-  if(!files.length){ await dlgAlert("Unsupported file","Supported formats: PDF, EPUB, MOBI/AZW/AZW3, DOCX, FB2, TXT, Markdown, HTML, CBZ/CBR (ZIP/RAR of images)."); return; }
-  const target=Shelf.cwd; let firstId=null;
+  if(!files.length){
+    if(!opts.silent) await dlgAlert("Unsupported file","Supported formats: PDF, EPUB, MOBI/AZW/AZW3, DOCX, FB2, TXT, Markdown, HTML, CBZ/CBR (ZIP/RAR of images).");
+    return {added:0, skipped:skipped.length, firstId:null};
+  }
+  const target = opts.targetFolderId!==undefined ? opts.targetFolderId : Shelf.cwd;
+  let firstId=null;
   for(const f of files){ const id=uid();
     await DB.putDoc({id,name:f.name,size:f.size,type:f.type,addedAt:Date.now(),blob:f});
     if(target) await DB.setMeta(id,{folderId:target});
     if(!firstId) firstId=id; }
+  if(opts.silent) return {added:files.length, skipped:skipped.length, firstId};
   await UI.refreshLibrary();
   if(skipped.length) await dlgAlert("Some files were skipped","Not a supported format:\n"+skipped.map(f=>"• "+f.name).join("\n"));
   if(files.length===1 && firstId) openDoc(firstId);
   else setStatus("Added "+files.length+" books.");
+  return {added:files.length, skipped:skipped.length, firstId};
+}
+
+// Imports a batch of files that carry folder structure (webkitRelativePath
+// from a real <input webkitdirectory>, or the ._relPath this app attaches to
+// files pulled via Native.pickFolder/readImportedFile), recreating that
+// structure as nested folders under the currently open folder.
+async function importFolder(fileList){
+  const all=[...fileList];
+  if(!all.length) return;
+  const relPath=(f)=>f.webkitRelativePath || f._relPath || f.name;
+  const groups=new Map(); // "Sub/Dir" (relative to the picked root) -> files[]
+  all.forEach(f=>{
+    const parts=relPath(f).split("/").filter(Boolean);
+    parts.pop();   // drop the filename itself
+    parts.shift(); // drop the picked root folder's own name -- that's Shelf.cwd, not a new subfolder
+    const key=parts.join("/");
+    if(!groups.has(key)) groups.set(key,[]);
+    groups.get(key).push(f);
+  });
+  let added=0, skipped=0;
+  for(const [dirKey, files] of groups){
+    const segs=dirKey?dirKey.split("/"):[];
+    const folderId = segs.length ? await Shelf.ensureFolderPath(Shelf.cwd, segs) : Shelf.cwd;
+    const r = await importFiles(files, {targetFolderId:folderId, silent:true});
+    added+=r.added; skipped+=r.skipped;
+  }
+  await UI.refreshLibrary();
+  if(!added){ await dlgAlert("No supported files found","That folder didn't contain any files in a supported format."); return; }
+  setStatus(`Imported ${added} book(s) from folder`+(skipped?`, skipped ${skipped} unsupported file(s).`:"."));
 }
 
 let parseToken=0;
@@ -1382,6 +1598,7 @@ let currentDoc=null, currentBlocks=null, currentFromOcr=false;
 async function finishOpen(doc, blocks, fromOcr){
   currentDoc=doc; currentBlocks=blocks; currentFromOcr=fromOcr;
   if (typeof Annot!=="undefined") Annot.cancelSelection();
+  if (typeof Ink!=="undefined"){ Ink.setActive(false); await Ink.loadForDoc(doc.id); }
   const ext = extOf(doc.name);
   const isPdf = isPagedExt(ext);        // page-image documents: PDF and comics
   const isComic = isComicExt(ext);
@@ -1400,7 +1617,7 @@ async function finishOpen(doc, blocks, fromOcr){
   else Reader.render(blocks, { totalPages: doc._ctx&&doc._ctx.pages });
   await Annot.loadForDoc(doc.id);
 
-  lastHi=-1;
+  lastHi=-1; _lastHlBox=null;
   const seek=$("#seek"); seek.max=Math.max(0,Reader.words.length-1); seek.value=0; seek.disabled=false;
   UI.enableControls(true);
   updatePageNav();
@@ -1424,9 +1641,10 @@ async function finishOpen(doc, blocks, fromOcr){
 
 function updateViewModeBtn(isPdf, mode){
   const row=$("#viewModeRow"), btn=$("#viewModeBtn");
-  if (!isPdf){ row.hidden=true; return; }
+  if (!isPdf){ row.hidden=true; if (typeof Ink!=="undefined") Ink.setAvailable(false); return; }
   row.hidden=false;
   btn.textContent = mode==="pdf" ? "\uD83D\uDCC4 PDF view (tap to switch to Text)" : "\uD83D\uDCDD Text view (tap to switch to PDF)";
+  if (typeof Ink!=="undefined") Ink.setAvailable(mode==="pdf");
 }
 $("#viewModeBtn").onclick=async()=>{
   if (!currentDoc || !currentBlocks) return;
@@ -1437,7 +1655,7 @@ $("#viewModeBtn").onclick=async()=>{
   if (next==="pdf") await Reader.renderPdf(currentBlocks, currentDoc, { totalPages: currentDoc._ctx&&currentDoc._ctx.pages });
   else Reader.render(currentBlocks, { totalPages: currentDoc._ctx&&currentDoc._ctx.pages });
   Annot.renderAll();
-  lastHi=-1;
+  lastHi=-1; _lastHlBox=null;
   $("#seek").max=Math.max(0,Reader.words.length-1);
   updatePageNav();
   updateViewModeBtn(true, next);
@@ -1570,7 +1788,9 @@ $("#exitFullscreenBtn").onclick=()=>toggleFullscreen(false);
 $("#pageInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") goToPage(); });
 
 function handleWordTap(i){
+  if (Ink.active) return;
   Speech.cursor=i; highlight(i); markReadUpTo(i-1); UI.updateSeek(i); saveProgress(true);
+  if(!ReadAloud.enabled) return; // direct reading: tap just marks the place, no narration
   if(!Speech.playing) Speech.play(true); else Speech.speakFrom(i,true);
 }
 
@@ -1751,6 +1971,7 @@ function suppressNextClick(){
   _suppressClickT=setTimeout(()=>{ _suppressNextClick=false; }, 400);
 }
 $("#content").addEventListener("pointerdown",(e)=>{
+  if (typeof Ink!=="undefined" && Ink.active) return; // stylus is drawing, not selecting
   if (e.pointerType==="mouse" && e.button!==0) return;
   _lpFired=false; _lpStartX=e.clientX; _lpStartY=e.clientY;
   clearTimeout(_lpTimer);
@@ -1782,6 +2003,147 @@ $("#annotCancelBtn").onclick=()=>Annot.cancelSelection();
 $("#noteCancelBtn").onclick=()=>{ $("#noteModal").hidden=true; Annot.cancelSelection(); };
 $("#noteSaveBtn").onclick=()=>Annot.saveNote();
 $("#noteDeleteBtn").onclick=()=>{ const id=$("#noteModal").dataset.editingId; if(id) Annot.deleteAnnotation(id); };
+
+/* ---------- stylus ink annotation ----------
+   Pen-only free-hand marks over a PDF/comic page. Strokes are stored in PDF-point
+   space (like Annot's word boxes) so they stay correctly placed across zoom/resize.
+   The canvas per page is created lazily the first time that page renders, and is
+   pointer-events:none until ink mode is switched on (see .inkcanvas in css.html). */
+const Ink = {
+  active:false, color:"#ff3b30", width:2.5, items:[], _drawing:null,
+
+  async loadForDoc(docId){
+    try{ this.items = await DB.inkForDoc(docId) || []; }catch(e){ this.items=[]; }
+  },
+  strokesForPage(page){ return this.items.filter(s=>s.page===page); },
+
+  setAvailable(on){
+    $("#inkToolsRow").hidden=!on;
+    if(!on && this.active) this.setActive(false);
+  },
+  setActive(on){
+    this.active=!!on;
+    $("#inkToolsBtn").classList.toggle("active", this.active);
+    $("#inkPanel").hidden=!this.active;
+    if(this.active){
+      $("#inkPanel").querySelectorAll(".swatch[data-ink-color]").forEach(b=>b.classList.toggle("selected", b.dataset.inkColor===this.color));
+      $("#inkWidth").value=this.width;
+    }
+    Object.keys(Reader.pageWrappers||{}).forEach(p=>{
+      const c=Reader.pageWrappers[p].querySelector(".inkcanvas");
+      if(c) c.style.pointerEvents = this.active ? "auto" : "none";
+    });
+    if(!this.active) this._drawing=null;
+  },
+  currentPage(){
+    let best=null, bestTop=Infinity;
+    Object.values(Reader.pageWrappers||{}).forEach(w=>{
+      const top=Math.abs(w.getBoundingClientRect().top);
+      if (top<bestTop){ bestTop=top; best=Number(w.dataset.page); }
+    });
+    return best;
+  },
+
+  // Called from renderPageCanvas every time a page (re)renders, same pattern as Annot.renderOne.
+  redrawPage(wrapper, pageNum){
+    let canvas=wrapper.querySelector(".inkcanvas");
+    if(!canvas){
+      canvas=el("canvas","inkcanvas");
+      wrapper.insertBefore(canvas, wrapper.querySelector(".pdfpagenum"));
+      this._wirePointerEvents(canvas, pageNum);
+    }
+    const cssW=wrapper.clientWidth||1, cssH=wrapper.clientHeight||1;
+    const dpr=Math.min(2, window.devicePixelRatio||1);
+    canvas.width=Math.round(cssW*dpr); canvas.height=Math.round(cssH*dpr);
+    canvas.style.pointerEvents = this.active ? "auto" : "none";
+    const ctx=canvas.getContext("2d");
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    const scale=(Reader.pageDisplayScale[pageNum]||(cssW/(Reader.pagePtWidth[pageNum]||612)))*dpr;
+    this.strokesForPage(pageNum).forEach(s=>this._paintStroke(ctx, s, scale));
+  },
+  _paintStroke(ctx, s, scale){
+    if(!s.pts || s.pts.length<2) return;
+    ctx.save(); ctx.lineCap="round"; ctx.lineJoin="round";
+    ctx.strokeStyle=s.color; ctx.lineWidth=Math.max(1,(s.width||2.5)*scale);
+    ctx.beginPath(); ctx.moveTo(s.pts[0][0]*scale, s.pts[0][1]*scale);
+    for(let i=1;i<s.pts.length;i++) ctx.lineTo(s.pts[i][0]*scale, s.pts[i][1]*scale);
+    ctx.stroke(); ctx.restore();
+  },
+
+  _wirePointerEvents(canvas, pageNum){
+    const toDocPt=(e)=>{
+      const rect=canvas.getBoundingClientRect();
+      const scale=Reader.pageDisplayScale[pageNum] || (rect.width/(Reader.pagePtWidth[pageNum]||612));
+      return [(e.clientX-rect.left)/scale, (e.clientY-rect.top)/scale];
+    };
+    canvas.addEventListener("pointerdown",(e)=>{
+      if(!this.active || e.pointerType!=="pen") return;
+      e.preventDefault(); e.stopPropagation();
+      try{ canvas.setPointerCapture(e.pointerId); }catch(err){}
+      this._drawing={page:pageNum, pts:[toDocPt(e)], canvas};
+      this._liveDraw(canvas, pageNum);
+    });
+    canvas.addEventListener("pointermove",(e)=>{
+      if(!this._drawing || this._drawing.canvas!==canvas) return;
+      e.preventDefault(); e.stopPropagation();
+      this._drawing.pts.push(toDocPt(e));
+      this._liveDraw(canvas, pageNum);
+    });
+    const finish=(e)=>{
+      if(!this._drawing || this._drawing.canvas!==canvas) return;
+      e.preventDefault(); e.stopPropagation();
+      const d=this._drawing; this._drawing=null;
+      this._commitStroke(d);
+    };
+    canvas.addEventListener("pointerup", finish);
+    canvas.addEventListener("pointercancel", finish);
+  },
+  _liveDraw(canvas, pageNum){
+    this.redrawPage(canvas.closest(".pdfpage"), pageNum); // repaint committed strokes
+    const dpr=Math.min(2, window.devicePixelRatio||1);
+    const cssW=canvas.closest(".pdfpage").clientWidth||1;
+    const scale=(Reader.pageDisplayScale[pageNum]||(cssW/(Reader.pagePtWidth[pageNum]||612)))*dpr;
+    this._paintStroke(canvas.getContext("2d"), {pts:this._drawing.pts, color:this.color, width:this.width}, scale);
+  },
+  async _commitStroke(d){
+    if(!d.pts || d.pts.length<2 || !UI.activeId) return;
+    const rec={ id:uid(), docId:UI.activeId, page:d.page, color:this.color, width:this.width, pts:d.pts, createdAt:Date.now() };
+    try{ await DB.putInk(rec); }catch(e){}
+    this.items.push(rec);
+    const wrapper=Reader.pageWrappers[d.page]; if(wrapper) this.redrawPage(wrapper, d.page);
+  },
+  async undo(){
+    if(!this.items.length) return;
+    let latest=this.items[0];
+    for(const s of this.items) if(s.createdAt>latest.createdAt) latest=s;
+    try{ await DB.delInk(latest.id); }catch(e){}
+    this.items=this.items.filter(s=>s.id!==latest.id);
+    const wrapper=Reader.pageWrappers[latest.page]; if(wrapper) this.redrawPage(wrapper, latest.page);
+  },
+  async clearPage(pageNum){
+    const onPage=this.strokesForPage(pageNum); if(!onPage.length) return;
+    for(const s of onPage){ try{ await DB.delInk(s.id); }catch(e){} }
+    const ids=new Set(onPage.map(s=>s.id));
+    this.items=this.items.filter(s=>!ids.has(s.id));
+    const wrapper=Reader.pageWrappers[pageNum]; if(wrapper) this.redrawPage(wrapper, pageNum);
+  }
+};
+$("#inkToolsBtn").onclick=()=>{ Ink.setActive(!Ink.active); closeMoreMenu(); };
+$("#inkDoneBtn").onclick=()=>Ink.setActive(false);
+$("#inkPanel").querySelectorAll(".swatch[data-ink-color]").forEach(btn=>{
+  btn.addEventListener("click",()=>{
+    Ink.color=btn.dataset.inkColor;
+    $("#inkPanel").querySelectorAll(".swatch[data-ink-color]").forEach(b=>b.classList.toggle("selected", b===btn));
+  });
+});
+$("#inkWidth").oninput=(e)=>{ Ink.width=parseFloat(e.target.value)||2.5; };
+$("#inkUndoBtn").onclick=()=>Ink.undo();
+$("#inkClearPageBtn").onclick=async()=>{
+  const p=Ink.currentPage(); if(p==null) return;
+  if(!Ink.strokesForPage(p).length) return;
+  if(!await dlgConfirm("Clear ink?","Remove all pen marks on this page?","Clear")) return;
+  Ink.clearPage(p);
+};
 
 function fmtAnnotSnippet(a){
   try{ return Reader.textFrom(a.startWord, Math.min(a.endWord, a.startWord+25)).slice(0,140); }catch(e){ return ""; }
@@ -1920,6 +2282,25 @@ $("#addBtn").onclick=()=>$("#fileInput").click();
 $("#welcomeAdd").onclick=()=>$("#fileInput").click();
 $("#fileInput").onchange=(e)=>{ importFiles(e.target.files); e.target.value=""; };
 ["dragover","drop"].forEach(ev=>document.addEventListener(ev,(e)=>{ e.preventDefault(); if(ev==="drop"&&e.dataTransfer.files.length) importFiles(e.dataTransfer.files); }));
+
+/* ---------- multi-select move + folder import -- wire up the toolbar ---------- */
+$("#selectModeBtn").onclick=()=>Shelf.enterSelectMode();
+$("#selectCancelBtn").onclick=()=>Shelf.exitSelectMode();
+$("#selectMoveBtn").onclick=()=>Shelf.moveSelected();
+$("#importFolderBtn").onclick=async()=>{
+  if (Native.has && typeof AndroidBridge.pickFolder==="function"){
+    setStatus("Importing folder…");
+    let manifest; try{ manifest=await Native.pickFolder(); }catch(e){ manifest=null; }
+    if (!manifest){ setStatus("Import cancelled."); return; }
+    if (!manifest.length){ await dlgAlert("Empty folder","That folder didn't contain any files."); return; }
+    const files=[];
+    for (const entry of manifest){ try{ files.push(await Native.readImportedFile(entry)); }catch(e){} }
+    await importFolder(files);
+  } else {
+    $("#folderInput").click(); // browser fallback: real <input webkitdirectory>
+  }
+};
+$("#folderInput").onchange=(e)=>{ importFolder(e.target.files); e.target.value=""; };
 window.addEventListener("beforeunload",()=>saveProgress(true));
 if(window.speechSynthesis){ Speech.loadVoices(); speechSynthesis.onvoiceschanged=()=>Speech.loadVoices(); }
 else $("#voiceSel").innerHTML="<option>No TTS available</option>";

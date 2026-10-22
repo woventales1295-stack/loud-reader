@@ -5,8 +5,10 @@ import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.DocumentsContract;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
@@ -22,12 +24,17 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 public class MainActivity extends Activity implements TextToSpeech.OnInitListener {
     private static final int FILECHOOSER_RESULTCODE = 51;
+    private static final int FOLDER_PICK_RESULTCODE = 52;
+    private static final int MAX_IMPORT_FILES = 4000; // sane bound on a single folder-import walk
     // Literal value of TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED (compile
     // classpath is the API 23 stub; the OS resolves strings at runtime anyway).
     private static final String FEATURE_NOT_INSTALLED = "notInstalled";
@@ -47,6 +54,19 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     // State of an in-progress chunked save (see FileBridge).
     private OutputStream saveOut;
     private Uri saveUri;
+
+    // Folder-import state (see FileBridge#pickFolder / #readImportChunk).
+    // importEntries maps a synthetic per-file id (assigned while walking the
+    // picked folder tree) to that file's content Uri, so the page can request
+    // bytes for one specific entry after it receives the manifest.
+    private final Map<String, Uri> importEntries = new HashMap<>();
+    // A single-slot "currently open" read stream: the page always reads one
+    // entry start-to-finish (sequential, increasing offsets) before moving to
+    // the next, same access pattern as FileBridge's chunked save in reverse,
+    // so one open stream is enough -- no need for true random-access seeking.
+    private String curImportId;
+    private InputStream curImportStream;
+    private long curImportPos;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -376,10 +396,208 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
                 }
             });
         }
+
+        /**
+         * Lets the page import a whole folder (with subfolders) from the
+         * device. Launches the system folder picker (Storage Access
+         * Framework); the result is delivered back to the page as
+         * window.__onFolderManifest(manifest) -- or
+         * window.__onFolderCancelled() if the user backs out -- once the
+         * (potentially large) tree has been walked off the UI thread.
+         */
+        @JavascriptInterface
+        public void pickFolder() {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            try {
+                startActivityForResult(intent, FOLDER_PICK_RESULTCODE);
+            } catch (Exception e) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() { evalJs("window.__onFolderCancelled && window.__onFolderCancelled()"); }
+                });
+            }
+        }
+
+        /**
+         * Pulls up to `length` bytes starting at `offset` from a previously
+         * manifested import entry, base64-encoded. Returns "" at EOF or on
+         * any error. The page is expected to call this with strictly
+         * increasing offsets for one id until it gets back a chunk shorter
+         * than requested (or empty) -- see the single-slot stream cache this
+         * relies on.
+         */
+        @JavascriptInterface
+        public String readImportChunk(String id, long offset, int length) {
+            try {
+                if (id == null || length <= 0) return "";
+                if (!id.equals(curImportId)) {
+                    closeImportStream();
+                    Uri uri = importEntries.get(id);
+                    if (uri == null) return "";
+                    curImportStream = getContentResolver().openInputStream(uri);
+                    curImportId = id;
+                    curImportPos = 0;
+                }
+                if (curImportStream == null) return "";
+                if (offset < curImportPos) return ""; // backwards seek isn't supported; bail safely
+                long toSkip = offset - curImportPos;
+                while (toSkip > 0) {
+                    long skipped = curImportStream.skip(toSkip);
+                    if (skipped <= 0) break;
+                    toSkip -= skipped; curImportPos += skipped;
+                }
+                byte[] buf = new byte[length];
+                int total = 0;
+                while (total < length) {
+                    int n = curImportStream.read(buf, total, length - total);
+                    if (n < 0) break;
+                    total += n;
+                }
+                curImportPos += total;
+                if (total <= 0) { closeImportStream(); return ""; }
+                String b64 = Base64.encodeToString(buf, 0, total, Base64.NO_WRAP);
+                if (total < length) closeImportStream(); // this call reached EOF
+                return b64;
+            } catch (Exception e) {
+                closeImportStream();
+                return "";
+            }
+        }
+
+        private void closeImportStream() {
+            try { if (curImportStream != null) curImportStream.close(); } catch (Exception e) { /* ignore */ }
+            curImportStream = null; curImportId = null; curImportPos = 0;
+        }
+    }
+
+    private void handleFolderPickResult(int resultCode, Intent data) {
+        if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
+            evalJs("window.__onFolderCancelled && window.__onFolderCancelled()");
+            return;
+        }
+        final Uri treeUri = data.getData();
+        try {
+            getContentResolver().takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Exception e) {
+            // Not fatal: we still have access to read within this activity session either way.
+        }
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String manifestJson = walkFolderTree(treeUri);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        evalJs("window.__onFolderManifest && window.__onFolderManifest(" + manifestJson + ")");
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** Walks the picked tree (background thread) and returns a JSON array literal of
+     *  {id,name,path,size} for every file found, breadth across subfolders included.
+     *  Also fills importEntries so readImportChunk can later resolve each id to its Uri. */
+    private String walkFolderTree(Uri treeUri) {
+        importEntries.clear();
+        StringBuilder sb = new StringBuilder("[");
+        try {
+            String treeDocId = DocumentsContract.getTreeDocumentId(treeUri);
+            String rootName = queryDisplayName(treeUri, treeDocId);
+            if (rootName == null || rootName.length() == 0) rootName = "Folder";
+            int[] counter = {0};
+            boolean[] firstRef = {true};
+            walkDocTree(treeUri, treeDocId, rootName, sb, firstRef, counter);
+        } catch (Exception e) {
+            // Return whatever was collected before the error.
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    private String queryDisplayName(Uri treeUri, String docId) {
+        Uri docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(docUri,
+                new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null);
+            if (c != null && c.moveToFirst()) return c.getString(0);
+        } catch (Exception e) {
+            // fall through
+        } finally {
+            if (c != null) c.close();
+        }
+        return null;
+    }
+
+    private void walkDocTree(Uri treeUri, String parentDocId, String path, StringBuilder sb,
+                              boolean[] firstRef, int[] counter) {
+        if (counter[0] >= MAX_IMPORT_FILES) return;
+        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId);
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(childrenUri, new String[]{
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE
+            }, null, null, null);
+            if (c == null) return;
+            while (c.moveToNext() && counter[0] < MAX_IMPORT_FILES) {
+                String docId = c.getString(0);
+                String name = c.getString(1);
+                String mime = c.getString(2);
+                long size = c.getLong(3);
+                if (name == null || docId == null) continue;
+                String childPath = path + "/" + name;
+                if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
+                    walkDocTree(treeUri, docId, childPath, sb, firstRef, counter);
+                } else {
+                    String id = "f" + counter[0];
+                    counter[0]++;
+                    Uri docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
+                    importEntries.put(id, docUri);
+                    if (!firstRef[0]) sb.append(",");
+                    firstRef[0] = false;
+                    sb.append("{\"id\":\"").append(id)
+                      .append("\",\"name\":\"").append(jsonEscape(name))
+                      .append("\",\"path\":\"").append(jsonEscape(childPath))
+                      .append("\",\"size\":").append(size)
+                      .append("}");
+                }
+            }
+        } catch (Exception e) {
+            // Skip this subtree on error; whatever was already appended to sb stands.
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    private static String jsonEscape(String s) {
+        if (s == null) return "";
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': out.append("\\\""); break;
+                case '\\': out.append("\\\\"); break;
+                case '\n': out.append("\\n"); break;
+                case '\r': out.append("\\r"); break;
+                case '\t': out.append("\\t"); break;
+                default:
+                    if (c < 0x20) out.append(String.format(Locale.US, "\\u%04x", (int) c));
+                    else out.append(c);
+            }
+        }
+        return out.toString();
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == FOLDER_PICK_RESULTCODE) {
+            handleFolderPickResult(resultCode, data);
+            return;
+        }
         if (requestCode != FILECHOOSER_RESULTCODE) {
             super.onActivityResult(requestCode, resultCode, data);
             return;
@@ -444,6 +662,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     protected void onDestroy() {
         if (tts != null) { tts.stop(); tts.shutdown(); tts = null; }
         try { if (saveOut != null) saveOut.close(); } catch (Exception e) { }
+        try { if (curImportStream != null) curImportStream.close(); } catch (Exception e) { }
         if (webView != null) { webView.destroy(); webView = null; }
         super.onDestroy();
     }
