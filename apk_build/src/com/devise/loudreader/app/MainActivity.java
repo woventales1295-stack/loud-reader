@@ -352,6 +352,44 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         }
 
         @JavascriptInterface
+        public void setVolumeKeyPaging(boolean on) {
+            volumeKeyPaging = on;
+        }
+
+        @JavascriptInterface
+        public boolean copyText(String text) {
+            try {
+                android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager) getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("Loud Reader", text));
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean lookupWord(String word) {
+            try {
+                Intent i = new Intent(Intent.ACTION_WEB_SEARCH);
+                i.putExtra("query", "define " + word);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+                return true;
+            } catch (Exception e) {
+                try {
+                    Intent v = new Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://www.google.com/search?q=" + Uri.encode("define " + word)));
+                    v.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(v);
+                    return true;
+                } catch (Exception e2) {
+                    return false;
+                }
+            }
+        }
+
+        @JavascriptInterface
         public void abortSave() {
             try { if (saveOut != null) saveOut.close(); } catch (Exception e) { }
             saveOut = null;
@@ -627,6 +665,31 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     protected void onResume() {
         super.onResume();
         if (webView != null) webView.onResume();
+    }
+
+    private boolean volumeKeyPaging = false;
+
+    @Override
+    public boolean onKeyDown(int keyCode, android.view.KeyEvent event) {
+        if (volumeKeyPaging && webView != null
+                && (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP
+                    || keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            if (event.getRepeatCount() == 0) {
+                int dir = (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) ? -1 : 1;
+                evalJs("window.__volKey&&window.__volKey(" + dir + ")");
+            }
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, android.view.KeyEvent event) {
+        if (volumeKeyPaging && (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP
+                || keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            return true;
+        }
+        return super.onKeyUp(keyCode, event);
     }
 
     /**

@@ -234,26 +234,27 @@ const Theme = {
   async init(){
     let saved=null;
     try{ const m=await DB.getMeta(this.SETTINGS_ID); saved=m&&m.theme; }catch(e){}
-    const theme = (saved==="light"||saved==="dark") ? saved
+    const theme = (["light","dark","sepia","gray","black"].indexOf(saved)>=0) ? saved
       : (window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
     this.apply(theme);
   },
   apply(theme){
     this.current=theme;
     document.documentElement.setAttribute("data-theme", theme);
+    try{ const mt=document.querySelector('meta[name="theme-color"]'); if(mt) mt.content = ({light:"#ffffff",dark:"#14161a",sepia:"#f4ecd8",gray:"#3a3d42",black:"#000000"})[theme]||"#14161a"; }catch(e){}
     const btn=$("#themeBtn"); if(!btn) return;
     btn.innerHTML = theme==="light"
       ? '<svg viewBox="0 0 24 24"><path d="M12 4V2m0 20v-2M4 12H2m20 0h-2M5.6 5.6 4.2 4.2m15.6 15.6-1.4-1.4M5.6 18.4 4.2 19.8M19.8 4.2l-1.4 1.4M12 7a5 5 0 100 10 5 5 0 000-10z"/></svg> Switch to dark mode'
       : '<svg viewBox="0 0 24 24"><path d="M20.7 15.3A8.5 8.5 0 119 3.3a7 7 0 0011.7 12z"/></svg> Switch to light mode';
     btn.title = theme==="light" ? "Switch to dark mode" : "Switch to light mode";
   },
+  async setTheme(t){ this.apply(t); try{ await DB.setMeta(this.SETTINGS_ID,{theme:t}); }catch(e){} },
   async toggle(){
     const next = this.current==="light" ? "dark" : "light";
-    this.apply(next);
-    try{ await DB.setMeta(this.SETTINGS_ID,{theme:next}); }catch(e){}
+    this.setTheme(next);
   }
 };
-$("#themeBtn").onclick=()=>{ Theme.toggle(); closeMoreMenu(); };
+$("#themeBtn").onclick=()=>{ closeMoreMenu(); Settings.open(); };
 Theme.init();
 
 /* ---------- read-aloud toggle: lets the app be used for silent/direct reading ---------- */
@@ -1164,7 +1165,7 @@ async function renderPageCanvas(wrapper, pageNum){
     const displayScale = cssWidth / vp1.width;
     Reader.pagePtWidth[pageNum]=vp1.width; Reader.pagePtHeight[pageNum]=vp1.height;
     wrapper.style.paddingTop=(vp1.height/vp1.width*100)+"%";
-    const dpr = Math.min(2, window.devicePixelRatio||1); // capped to bound memory on very high-density screens
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio||1, 3200/cssWidth)); // capped to bound memory (also when zoomed in)
     const vp = page.getViewport({scale: displayScale*dpr});
     const canvas = wrapper.querySelector("canvas");
     canvas.width = Math.round(vp.width); canvas.height = Math.round(vp.height);
@@ -1222,23 +1223,30 @@ const Speech = {
     u.onboundary=(e)=>{ if(e.name && e.name!=="word") return;
       let lo=0,hi=offs.length-1,pick=0;
       while(lo<=hi){ const mid=(lo+hi)>>1; if(offs[mid].at<=e.charIndex){ pick=mid; lo=mid+1; } else hi=mid-1; }
-      highlight(offs[pick].word); this.cursor=offs[pick].word; UI.updateSeek(offs[pick].word); saveProgress();
+      highlight(offs[pick].word); this.cursor=offs[pick].word; saveProgress();
     };
     u.onend=()=>{ if(!this.playing) return; markReadUpTo(endWord); this.cursor=endWord+1; this.speakFrom(endWord+1); };
     u.onerror=(ev)=>{ if(ev.error!=="interrupted"&&ev.error!=="canceled") setStatus("Speech error: "+ev.error); };
     this.utter=u; this.synth.speak(u);
   },
-  play(force){ if(!Reader.words.length || !ReadAloud.enabled) return; this.playing=true; UI.setPlaying(true); Native.keepOn(true);
-    if(this.synth.paused&&this.synth.speaking) this.synth.resume(); else this.speakFrom(this.cursor||0, force); },
-  pause(){ this.playing=false; UI.setPlaying(false); Native.keepOn(false); if(this.synth.speaking) this.synth.pause(); saveProgress(true); },
+  play(force){ if(!Reader.words.length || !ReadAloud.enabled) return;
+    const resuming = this.synth.paused&&this.synth.speaking;
+    this.playing=true; UI.setPlaying(true); Reading.keepAwake(); showDock(true);
+    if(resuming){ Follow.setOn(true); this.synth.resume(); }
+    else{
+      if(!force){ this.cursor=Reading.audioStartIndex(); }   // start where the reader is looking, not where audio last stopped
+      Follow.setOn(true); this.speakFrom(this.cursor||0, force);
+    }
+    updateDockInfo(); },
+  pause(){ this.playing=false; UI.setPlaying(false); Reading.keepAwake(); if(this.synth.speaking) this.synth.pause(); saveProgress(true); updateDockInfo(); Follow.setOn(true); },
   toggle(){ this.playing?this.pause():this.play(); },
-  stop(finished){ this.playing=false; UI.setPlaying(false); Native.keepOn(false); if(this.synth) this.synth.cancel(); if(finished) setStatus("Finished."); saveProgress(true); },
+  stop(finished){ this.playing=false; UI.setPlaying(false); Reading.keepAwake(); if(this.synth) this.synth.cancel(); if(finished) setStatus("Finished."); saveProgress(true); if(typeof updateDockInfo==="function") updateDockInfo(); Follow.setOn(true); },
   seekTo(wordIdx,resume){ wordIdx=Math.max(0,Math.min(wordIdx,Reader.words.length-1)); const s=Reader.sentStart[wordIdx];
-    this.cursor=s; highlight(s); markReadUpTo(s-1); UI.updateSeek(s); saveProgress(true); if(resume&&this.playing) this.speakFrom(s); },
+    this.cursor=s; highlight(s); markReadUpTo(s-1); saveProgress(true); if(resume&&this.playing) this.speakFrom(s); },
   next(){ this.jump(Reader.sentEnd[this.cursor]+1); },
   prev(){ const cs=Reader.sentStart[this.cursor]; this.jump(cs>0?Reader.sentStart[cs-1]:0); },
   jump(wordIdx){ if(wordIdx>=Reader.words.length){ this.stop(true); return; } wordIdx=Math.max(0,wordIdx); this.cursor=wordIdx;
-    highlight(wordIdx); markReadUpTo(wordIdx-1); UI.updateSeek(wordIdx); saveProgress(true); if(this.playing) this.speakFrom(wordIdx); }
+    highlight(wordIdx); markReadUpTo(wordIdx-1); saveProgress(true); if(this.playing) this.speakFrom(wordIdx); }
 };
 
 let lastHi=-1;
@@ -1256,6 +1264,7 @@ let lastHi=-1;
 // and skipping the call entirely when already comfortably in view fixes that.
 let _scrollRAF=0, _scrollTarget=null;
 function smoothScrollIntoViewIfNeeded(target){
+  if(!Follow.shouldScroll()) return;   // reading position is the user's; audio only drives the view while "follow" is on
   _scrollTarget=target;
   if(_scrollRAF) return;
   _scrollRAF=requestAnimationFrame(()=>{
@@ -1281,12 +1290,13 @@ function highlight(i){
   lastHi=i;
 }
 function markReadUpTo(i){
-  if (Reader.mode==="pdf") return; // no trailing "already read" shading over a real page image
+  if (Reader.mode==="pdf") return;
+  if (!RS.dimRead) return; // no trailing "already read" shading over a real page image
   for(let k=0;k<=i&&k<Reader.words.length;k++){ const w=Reader.words[k]; if(w.span){ const c=w.span.classList; c.remove("speaking"); c.add("read"); } }
   for(let k=i+1;k<Reader.words.length;k++){ const w=Reader.words[k]; if(w.span) w.span.classList.remove("read"); }
 }
 let _lastHlBox=null; // {page,left,top} of the previously shown .pdfhl box, for the snap-vs-glide decision below
-function highlightPdf(i){
+function highlightPdf(i, noScroll){
   const w=Reader.words[i]; if(!w || w.page==null || w.x==null) return;
   Object.keys(Reader.pageWrappers).forEach(p=>{
     if (Number(p)!==w.page){ const hl=Reader.pageWrappers[p].querySelector(".pdfhl"); if(hl) hl.style.display="none"; }
@@ -1313,7 +1323,7 @@ function highlightPdf(i){
     hl.style.width=width+"px"; hl.style.height=height+"px";
     hl.style.display="block";
     _lastHlBox={page:w.page,left,top};
-    smoothScrollIntoViewIfNeeded(hl);
+    if(!noScroll) smoothScrollIntoViewIfNeeded(hl);
   };
   if (wrapper.dataset.rendered==="1") positionAndShow();
   else renderPageCanvas(wrapper, w.page).then(positionAndShow);
@@ -1323,7 +1333,7 @@ let _saveT=0;
 function saveProgress(force){
   if(UI.activeId==null || !Reader.words.length) return;
   const now=Date.now(); if(!force && now-_saveT<2500) return; _saveT=now;
-  DB.setMeta(UI.activeId,{ progress:Speech.cursor, wordCount:Reader.words.length, lastOpened:now });
+  DB.setMeta(UI.activeId,{ progress:Reading.pos, audioPos:Speech.cursor, wordCount:Reader.words.length, lastOpened:now });
 }
 
 const UI = {
@@ -1333,10 +1343,9 @@ const UI = {
     const ttsOn = on && (typeof ReadAloud==="undefined" || ReadAloud.enabled);
     ["#playBtn","#prevBtn","#nextBtn","#voiceSel","#rate","#pitch"].forEach(s=>{ const e=$(s); if(e) e.disabled=!ttsOn; });
     $("#seek").disabled=!on; // scrubbing/position-marking still works without read-aloud
+    if(typeof updateDockInfo==="function") updateDockInfo();
   },
-  updateSeek(wordIdx){ $("#seek").value=wordIdx;
-    const pct=Reader.words.length?Math.round((wordIdx/(Reader.words.length-1))*100):0;
-    $("#posLabel").textContent=pct+"%"; $("#wordHint").textContent=`word ${wordIdx+1} of ${Reader.words.length}`; },
+  updateSeek(){ /* the reading position drives the progress UI now: see Reading.update */ },
   refreshLibrary(){ return Shelf.render(); }
 };
 
@@ -1355,8 +1364,8 @@ const Shelf = {
   chain(folders, id){ const out=[]; let cur=id; const seen=new Set();
     while(cur && !seen.has(cur)){ seen.add(cur); const f=folders.find(x=>x.id===cur); if(!f) break; out.unshift(f); cur=f.parent||null; }
     return out; },
-  show(overReader){ this.visible=true; this.overReader=!!overReader&&UI.activeId!=null; $("#shelf").hidden=false; return this.render(); },
-  hide(){ this.visible=false; $("#shelf").hidden=true; },
+  show(overReader){ this.visible=true; this.overReader=!!overReader&&UI.activeId!=null; $("#shelf").hidden=false; if(typeof Reading!=="undefined") Reading.syncChrome(); return this.render(); },
+  hide(){ this.visible=false; $("#shelf").hidden=true; if(typeof Reading!=="undefined") Reading.syncChrome(); },
   async up(){
     const {folders}=await this._load(); const f=folders.find(x=>x.id===this.cwd);
     this.cwd=(f&&f.parent)||null; return this.render();
@@ -1513,7 +1522,7 @@ function closeCurrentDoc(){
   UI.activeId=null; Speech.stop(); currentDoc=null; currentBlocks=null;   // null the id first so stop() doesn't re-save progress for a deleted book
   Reader.render([]); $("#content").innerHTML=WELCOME_HTML;
   $("#welcomeAdd").onclick=()=>$("#fileInput").click();
-  $("#docTitle").textContent="No document open"; setStatus("Add a book to begin.");
+  $("#docTitle").textContent="No document open"; setStatus("Add a book to begin."); if(typeof Reading!=="undefined"){ Reading.syncChrome(); showDock(false); }
   UI.enableControls(false); hideOcrBar(); updatePageNav(); updateViewModeBtn(false,"text");
   if(!Shelf.visible) Shelf.show(false);
 }
@@ -1623,15 +1632,13 @@ async function finishOpen(doc, blocks, fromOcr){
   updatePageNav();
   updateViewModeBtn(isPdf, mode);
   const meta=await DB.getMeta(doc.id); let resumedPct=0;
-  if(meta&&meta.progress>0&&meta.progress<Reader.words.length){
-    Speech.cursor=meta.progress; highlight(meta.progress); markReadUpTo(meta.progress-1); UI.updateSeek(meta.progress);
-    resumedPct=Math.round((meta.progress/(Reader.words.length-1))*100);
-    setTimeout(()=>{ const w=Reader.words[meta.progress]; if(w&&w.span) w.span.scrollIntoView({block:"center"}); },60);
-  } else { Speech.cursor=0; UI.updateSeek(0); }
+  Speech.cursor = (meta && meta.audioPos>0 && meta.audioPos<Reader.words.length) ? meta.audioPos : 0;
+  resumedPct = Reading.restore(meta) || 0;
+  Reading.syncChrome();
   DB.setMeta(doc.id,{ wordCount:Reader.words.length, lastOpened:Date.now() });
   const wc=Reader.bodyWordCount; const base=`${wc.toLocaleString()} words · ${Reader.starts.length.toLocaleString()} sentences`;
   const fallbackNote = autoFellBack ? " (switched to text view — this document has no word positions to tap in PDF view)" : "";
-  setStatus((resumedPct?`Resumed at ${resumedPct}% · ${base}.`:`Ready · ${base}.`)+` Tap a word or press play.${fallbackNote}`);
+  setStatus((resumedPct?`Resumed at ${resumedPct}% · ${base}.`:`Ready · ${base}.`)+` ${fallbackNote}`);
   const pages=doc._ctx&&doc._ctx.pages;
   const lowText=!fromOcr && ext==="pdf" && (Reader.bodyWordCount<Math.max(25,(pages||1)*10));
   if(isComic && !fromOcr){ showOcrBar(doc, "comic"); setStatus(`${(pages||0).toLocaleString()} pages · run OCR to read this aloud.`); }
@@ -1649,7 +1656,7 @@ function updateViewModeBtn(isPdf, mode){
 $("#viewModeBtn").onclick=async()=>{
   if (!currentDoc || !currentBlocks) return;
   const next = Reader.mode==="pdf" ? "text" : "pdf";
-  const savedCursor = Speech.cursor||0;
+  const savedCursor = Reading.measure ? (Reading.measure()||0) : (Speech.cursor||0);
   Speech.stop();
   try{ await DB.setMeta(Theme.SETTINGS_ID,{viewMode:next}); }catch(e){}
   if (next==="pdf") await Reader.renderPdf(currentBlocks, currentDoc, { totalPages: currentDoc._ctx&&currentDoc._ctx.pages });
@@ -1660,7 +1667,8 @@ $("#viewModeBtn").onclick=async()=>{
   updatePageNav();
   updateViewModeBtn(true, next);
   const idx=Math.min(savedCursor, Math.max(0,Reader.words.length-1));
-  Speech.cursor=idx; highlight(idx); UI.updateSeek(idx);
+  Speech.cursor=idx; Reading.pos=idx; Reading.syncChrome();
+  setTimeout(()=>Reading.goToWord(idx,{noAudio:true}),50);
   closeMoreMenu();
 };
 
@@ -1740,28 +1748,33 @@ function goToPage(){
   if(!Number.isFinite(n)) return;
   const idx=Reader.wordIndexForPage(n);
   if(idx==null){ setStatus("No content found for that page."); return; }
-  Speech.jump(idx);
+  Reading.goToWord(idx,{noAudio:true});
 }
 $("#pageGoBtn").onclick=goToPage;
 
-let _resizeSettleT=0;
-function handleReaderResize(){
-  if (Reader.mode!=="pdf") return;
-  Object.keys(Reader.pageWrappers).forEach(pStr=>{
-    const p=Number(pStr), wrapper=Reader.pageWrappers[p];
-    if (wrapper.dataset.rendered==="1"){
-      Reader.pageDisplayScale[p] = wrapper.clientWidth/(Reader.pagePtWidth[p]||612);
-    }
-  });
-  // If the current highlight is on a page whose scale just changed,
-  // reposition it immediately rather than waiting for the next word.
-  if (Speech.cursor!=null && lastHi>=0) highlightPdf(lastHi);
+let _resizeSettleT=0, _lastReaderW=0;
+function handleReaderResize(force){
+  if (Reader.mode!=="pdf"){ _lastReaderW=$("#reader").clientWidth; return; }
+  const rw=$("#reader").clientWidth;
+  const widthChanged = force===true || Math.abs(rw-_lastReaderW)>1; _lastReaderW=rw;
+  const apply=()=>{
+    Object.keys(Reader.pageWrappers).forEach(pStr=>{
+      const p=Number(pStr), wrapper=Reader.pageWrappers[p];
+      if (wrapper.dataset.rendered==="1"){
+        Reader.pageDisplayScale[p] = wrapper.clientWidth/(Reader.pagePtWidth[p]||612);
+      }
+    });
+    // reposition (never scroll to) the audio highlight, then re-render sharp canvases
+    if (lastHi>=0 && Speech.playing) highlightPdf(lastHi, true);
+  };
+  if (widthChanged && Reading.withAnchor) Reading.withAnchor(apply); else apply();
   clearTimeout(_resizeSettleT);
   _resizeSettleT=setTimeout(()=>{
-    Object.keys(Reader.pageWrappers).forEach(pStr=>{
+    const redo=()=>Object.keys(Reader.pageWrappers).forEach(pStr=>{
       const p=Number(pStr), wrapper=Reader.pageWrappers[p];
       if (wrapper.dataset.rendered==="1"){ wrapper.dataset.rendered="0"; renderPageCanvas(wrapper,p); }
     });
+    if (Reading.withAnchor) Reading.withAnchor(redo); else redo();
   }, 300);
 }
 new ResizeObserver(()=>handleReaderResize()).observe($("#reader"));
@@ -1787,12 +1800,7 @@ $("#fullscreenBtn").onclick=()=>toggleFullscreen(true);
 $("#exitFullscreenBtn").onclick=()=>toggleFullscreen(false);
 $("#pageInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") goToPage(); });
 
-function handleWordTap(i){
-  if (Ink.active) return;
-  Speech.cursor=i; highlight(i); markReadUpTo(i-1); UI.updateSeek(i); saveProgress(true);
-  if(!ReadAloud.enabled) return; // direct reading: tap just marks the place, no narration
-  if(!Speech.playing) Speech.play(true); else Speech.speakFrom(i,true);
-}
+function handleWordTap(i){ /* superseded by Reading.onTap (tap zones); kept so old callers don't break */ }
 
 /* ---------- highlights & notes ---------- */
 // One record covers both: a highlight is just a record with note:"". Presence
@@ -2203,6 +2211,14 @@ window.__handleBack=function(){
   if(!$("#annotListModal").hidden){ $("#annotListModal").hidden=true; return true; }
   if(Annot.selecting){ Annot.cancelSelection(); return true; }
   if(!$("#moreMenu").hidden){ closeMoreMenu(); return true; }
+  if(typeof Settings!=="undefined"){
+    if(!$("#settingsSheet").hidden){ Settings.close(); return true; }
+    if(!$("#navSheet").hidden){ Nav.close(); return true; }
+    if(!$("#searchChip").hidden){ Reading.clearSearch(); return true; }
+    if(!$("#autoChip").hidden){ Reading.stopAuto(); return true; }
+    if(!$("#listenDock").hidden && UI.activeId!=null && !Shelf.visible){ if(Speech.playing) Speech.pause(); showDock(false); return true; }
+    if(document.body.classList.contains("reading") && document.body.classList.contains("chrome-hidden")){ Reading.setChrome(true); return true; }
+  }
   if(document.body.classList.contains("reading-fullscreen")){ toggleFullscreen(false); return true; }
   if(Shelf.visible){
     if(Shelf.cwd){ Shelf.up(); return true; }
@@ -2218,65 +2234,20 @@ window.__handleBack=function(){
 };
 $("#annotListCloseBtn").onclick=()=>{ $("#annotListModal").hidden=true; };
 
-$("#content").addEventListener("click",(e)=>{
-  if (_suppressNextClick){ _suppressNextClick=false; clearTimeout(_suppressClickT); e.stopPropagation(); return; }
-  const span=e.target.closest(".w"); if(!span) return; const i=parseInt(span.dataset.i,10);
-  handleWordTap(i);
-});
-
-// Returns true if a tap doesn't land reasonably close to any actual word --
-// used to let a tap on blank reading-area space toggle fullscreen without
-// stealing taps meant for tap-to-read.
-function isBlankAreaTap(e){
-  const hit=document.elementFromPoint(e.clientX, e.clientY);
-  if (Reader.mode==="text") return !(hit && hit.closest(".w"));
-  const wrapper = hit && hit.closest(".pdfpage");
-  if (!wrapper) return true; // tap landed outside any page entirely
-  const p=Number(wrapper.dataset.page);
-  const canvas=wrapper.querySelector("canvas"); if(!canvas) return true;
-  const rect=canvas.getBoundingClientRect();
-  const scale=Reader.pageDisplayScale[p] || (rect.width/(Reader.pagePtWidth[p]||612));
-  const px=(e.clientX-rect.left)/scale, py=(e.clientY-rect.top)/scale;
-  let bestDist=Infinity;
-  for (let i=0;i<Reader.words.length;i++){
-    const w=Reader.words[i]; if (w.page!==p || w.x==null) continue;
-    const dx=(w.x+w.w/2)-px, dy=(w.y+w.h/2)-py;
-    const dist=Math.sqrt(dx*dx+dy*dy);
-    if (dist<bestDist) bestDist=dist;
-  }
-  const THRESH_PT=28; // roughly two line-heights of typical body text
-  return bestDist>THRESH_PT;
-}
 function toggleFullscreen(force){
   const on = force!==undefined ? force : !document.body.classList.contains("reading-fullscreen");
   document.body.classList.toggle("reading-fullscreen", on);
   $("#exitFullscreenBtn").hidden=!on;
   if (on){ closeMoreMenu(); }
 }
-$("#reader").addEventListener("click",(e)=>{
-  if (_suppressNextClick) return; // already consumed/being handled by the content click listener above
-  if (Annot.selecting) return; // a tap during an active selection shouldn't also toggle fullscreen
-  if (!Reader.words.length) return; // no document open yet
-  if (!isBlankAreaTap(e)) return; // landed on/near a word -- let tap-to-read own this one
-  toggleFullscreen();
-});
-const seekEl=$("#seek");
-seekEl.addEventListener("input",()=>{ const i=parseInt(seekEl.value,10); highlight(i);
-  const pct=Reader.words.length?Math.round((i/(Reader.words.length-1))*100):0;
-  $("#posLabel").textContent=pct+"%"; $("#wordHint").textContent=`word ${i+1} of ${Reader.words.length}`; });
-seekEl.addEventListener("change",()=>Speech.seekTo(parseInt(seekEl.value,10),true));
+/* scrubber is handled in reading.js (it scrolls the page, not the audio) */
 $("#playBtn").onclick=()=>Speech.toggle();
 $("#nextBtn").onclick=()=>Speech.next();
 $("#prevBtn").onclick=()=>Speech.prev();
 $("#rate").oninput=(e)=>{ $("#rateVal").textContent=parseFloat(e.target.value).toFixed(1)+"×"; if(Speech.playing) Speech.speakFrom(Speech.cursor); };
+$("#rate").addEventListener("change",()=>{ try{DB.setMeta(Theme.SETTINGS_ID,{ttsRate:$("#rate").value,ttsPitch:$("#pitch").value});}catch(e){} });
 $("#pitch").oninput=(e)=>{ $("#pitchVal").textContent=parseFloat(e.target.value).toFixed(1); if(Speech.playing) Speech.speakFrom(Speech.cursor); };
 $("#voiceSel").onchange=()=>{ if(Speech.playing) Speech.speakFrom(Speech.cursor); };
-$("#fontSize").oninput=(e)=>{ $("#content").style.setProperty("--fs",e.target.value+"px"); };
-document.addEventListener("keydown",(e)=>{
-  if(e.target.tagName==="INPUT"||e.target.tagName==="SELECT") return;
-  if(e.code==="Space"){ e.preventDefault(); if(!$("#playBtn").disabled) Speech.toggle(); }
-  else if(e.code==="ArrowRight") Speech.next(); else if(e.code==="ArrowLeft") Speech.prev();
-});
 $("#menuBtn").onclick=()=>{ if(Shelf.visible){ if(UI.activeId!=null) Shelf.hide(); } else Shelf.show(true); };
 $("#addBtn").onclick=()=>$("#fileInput").click();
 $("#welcomeAdd").onclick=()=>$("#fileInput").click();
@@ -2305,9 +2276,10 @@ window.addEventListener("beforeunload",()=>saveProgress(true));
 if(window.speechSynthesis){ Speech.loadVoices(); speechSynthesis.onvoiceschanged=()=>Speech.loadVoices(); }
 else $("#voiceSel").innerHTML="<option>No TTS available</option>";
 setInterval(()=>{ if(Speech.playing&&speechSynthesis.speaking&&!speechSynthesis.paused){ speechSynthesis.pause(); speechSynthesis.resume(); } },12000);
+/*__READING_JS__*/
 Shelf.show(false);
 
-window.__LoudReader = { Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
+window.__LoudReader = { Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
 } /* end appInit */
 </script>
 </body>

@@ -4,8 +4,13 @@
 <header>
   <button id="menuBtn" class="round" title="Library"><svg viewBox="0 0 24 24"><path d="M3 6h18v2H3zM3 11h18v2H3zM3 16h18v2H3z"/></svg></button>
   <div class="brand"><span class="dot"></span> Loud Reader</div>
+  <button id="hdrTitleBtn" class="hdrTitle" title="Contents" hidden><span id="hdrTitle"></span><span id="hdrSub"></span></button>
   <div class="spacer"></div>
   <button id="addBtn" class="btn-accent icon-btn" title="Add files to the current folder"><svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg> Add files</button>
+  <button id="searchBtn" class="round rtool" title="Search in book"><svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></button>
+  <button id="bookmarkBtn" class="round rtool" title="Bookmark this page"><svg viewBox="0 0 24 24"><path id="bookmarkPath" d="M17 3H7a2 2 0 00-2 2v16l7-3 7 3V5a2 2 0 00-2-2zm0 15-5-2.18L7 18V5h10v13z"/></svg></button>
+  <button id="typeBtn" class="round rtool" title="Appearance &amp; text"><svg viewBox="0 0 24 24"><path d="M9.93 13.5h4.14L12 7.98 9.93 13.5zM20 2H4a2 2 0 00-2 2v16a2 2 0 002 2h16a2 2 0 002-2V4a2 2 0 00-2-2zm-4.05 16.5-1.14-3H9.17l-1.12 3H5.96l5.11-13h1.86l5.11 13h-2.09z"/></svg></button>
+  <button id="listenBtn" class="round rtool" title="Listen (read aloud)"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 00-9 9v7a2 2 0 002 2h3v-8H5v-1a7 7 0 0114 0v1h-3v8h3a2 2 0 002-2v-7a9 9 0 00-9-9z"/></svg></button>
   <button id="moreBtn" class="round" title="More options"><svg viewBox="0 0 24 24"><path d="M12 8a2 2 0 100-4 2 2 0 000 4zm0 6a2 2 0 100-4 2 2 0 000 4zm0 6a2 2 0 100-4 2 2 0 000 4z"/></svg></button>
   <input id="fileInput" type="file" accept=".pdf,.epub,.docx,.mobi,.azw,.azw3,.prc,.fb2,.txt,.md,.markdown,.html,.htm,.xhtml,.cbz,.cbr,.zip,.rar,*/*" multiple hidden />
   <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
@@ -65,38 +70,24 @@
     <div id="reader">
       <div id="content">
         <div class="welcome">
-          <h1>📖🔊 Read anything out loud</h1>
-          <p>Import your documents and let your device narrate them — with the current word highlighted as it speaks. Everything, including OCR for scanned PDFs and comics, runs completely offline.</p>
-          <button class="big" id="welcomeAdd">Add your first document</button>
+          <h1>📖 Your offline reading room</h1>
+          <p>Read PDFs, EPUBs, comics and more with a comfortable, distraction-free reader — and switch on read-aloud whenever you want a voice to take over. Everything, including OCR for scanned books, works completely offline.</p>
+          <button class="big" id="welcomeAdd">Add your first book</button>
           <ul>
-            <li>✅ PDF, EPUB, MOBI/AZW3, DOCX, FB2, TXT, Markdown, HTML, CBZ/CBR — no file-size limit</li>
-            <li>✅ Organise books into folders</li>
-            <li>✅ Play / pause, speed &amp; tone (pitch) control</li>
-            <li>✅ Skip forward / back by sentence</li>
-            <li>✅ Tap any word to start reading there</li>
-            <li>✅ Drag the slider to scrub through the text</li>
-            <li>✅ Remembers where you left off in each book</li>
-            <li>✅ Built-in OCR for scanned PDFs &amp; comics — no internet ever</li>
-            <li>✅ Export your highlights &amp; notes</li>
+            <li>✅ PDF, EPUB, MOBI/AZW3, DOCX, FB2, TXT, Markdown, HTML, CBZ/CBR</li>
+            <li>✅ Themes (light, sepia, dark, black), fonts, margins, line spacing</li>
+            <li>✅ Pinch to zoom, tap edges to turn pages, volume-key paging</li>
+            <li>✅ Chapters, bookmarks, search, reading time left</li>
+            <li>✅ Highlights, notes &amp; stylus ink on PDFs</li>
+            <li>✅ Read aloud with a floating player — your place is never lost</li>
+            <li>✅ Folders, multi-select, folder import</li>
           </ul>
         </div>
       </div>
     </div>
     <footer>
       <div class="seek"><input id="seek" type="range" min="0" max="0" value="0" step="1" disabled /><div class="time"><span id="posLabel">0%</span></div></div>
-      <div class="controls">
-        <div class="transport">
-          <button id="prevBtn" class="round" title="Previous sentence" disabled><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zM20 6v12l-9-6z"/></svg></button>
-          <button id="playBtn" class="round btn-accent" title="Play" disabled><svg id="playIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
-          <button id="nextBtn" class="round" title="Next sentence" disabled><svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM4 6l9 6-9 6z"/></svg></button>
-        </div>
-        <div class="knob"><span>Voice</span><select id="voiceSel" class="voice"></select></div>
-        <div class="knob"><span>Speed</span><input id="rate" type="range" min="0.5" max="2.5" step="0.1" value="1" /><span class="val" id="rateVal">1.0×</span></div>
-        <div class="knob hide-sm"><span>Tone</span><input id="pitch" type="range" min="0" max="2" step="0.1" value="1" /><span class="val" id="pitchVal">1.0</span></div>
-        <div class="knob hide-sm"><span>Size</span><input id="fontSize" type="range" min="16" max="34" step="1" value="20" /></div>
-        <div class="grow"></div>
-        <span class="hint" id="wordHint"></span>
-      </div>
+      <div class="footInfo"><span id="wordHint"></span><span id="chapLabel"></span></div>
     </footer>
   </main>
 </div>
@@ -108,6 +99,9 @@
   <button class="swatch" data-color="green" style="background:#8ce99a"></button>
   <button class="swatch" data-color="pink" style="background:#ffa8c5"></button>
   <button class="swatch" data-color="blue" style="background:#8ecdf7"></button>
+  <button id="annotReadBtn" title="Read aloud from here"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+  <button id="annotCopyBtn" title="Copy"><svg viewBox="0 0 24 24"><path d="M16 1H4a2 2 0 00-2 2v14h2V3h12V1zm3 4H8a2 2 0 00-2 2v14a2 2 0 002 2h11a2 2 0 002-2V7a2 2 0 00-2-2zm0 16H8V7h11v14z"/></svg></button>
+  <button id="annotDefineBtn" title="Look up"><svg viewBox="0 0 24 24"><path d="M18 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/></svg></button>
   <button id="annotNoteBtn" title="Add note"><svg viewBox="0 0 24 24"><path d="M4 4h16v12H8l-4 4V4z"/></svg></button>
   <button id="annotCancelBtn" title="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
 </div>
@@ -153,6 +147,46 @@
     <div id="dlgChoices"></div>
     <div class="modalActions"><span class="grow"></span><button id="dlgCancel">Cancel</button><button id="dlgOk" class="btn-accent">OK</button></div>
   </div>
+</div>
+
+
+<div id="listenDock" hidden>
+  <div class="dockRow">
+    <button id="prevBtn" class="round" title="Previous sentence" disabled><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zM20 6v12l-9-6z"/></svg></button>
+    <button id="playBtn" class="round btn-accent" title="Play" disabled><svg id="playIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+    <button id="nextBtn" class="round" title="Next sentence" disabled><svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM4 6l9 6-9 6z"/></svg></button>
+    <div id="dockInfo" class="dockInfo">Read aloud</div>
+    <button id="dockMore" class="round" title="Voice, speed &amp; timer"><svg viewBox="0 0 24 24"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg></button>
+    <button id="dockClose" class="round" title="Stop &amp; hide player"><svg viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+  </div>
+  <div id="dockPanel" hidden>
+    <div class="knob"><span>Voice</span><select id="voiceSel" class="voice"></select></div>
+    <div class="knob"><span>Speed</span><input id="rate" type="range" min="0.5" max="2.5" step="0.1" value="1" /><span class="val" id="rateVal">1.0×</span></div>
+    <div class="knob"><span>Tone</span><input id="pitch" type="range" min="0" max="2" step="0.1" value="1" /><span class="val" id="pitchVal">1.0</span></div>
+    <div class="knob"><span>Sleep</span>
+      <select id="sleepSel"><option value="0">Off</option><option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">60 min</option><option value="chapter">End of chapter</option></select>
+      <span class="val" id="sleepLeft"></span></div>
+    <div class="knob"><label class="chk"><input id="followChk" type="checkbox" checked /> Keep my page following the voice</label></div>
+  </div>
+</div>
+
+<div id="followChip" hidden><button id="followBtn">⤓ Back to the voice</button></div>
+<div id="autoChip" hidden><button id="autoSlower">−</button><span id="autoLabel">Auto-scroll</span><button id="autoFaster">+</button><button id="autoStop">Stop</button></div>
+<div id="searchChip" hidden><button id="searchPrev">‹</button><span id="searchCount"></span><button id="searchNext">›</button><button id="searchClear">✕</button></div>
+<div id="toast" hidden></div>
+<div id="dimOverlay"></div><div id="warmOverlay"></div>
+
+<div id="sheetScrim" hidden></div>
+<div id="settingsSheet" class="sheet" hidden>
+  <div class="sheetGrip"></div>
+  <div class="sheetBody" id="settingsBody"></div>
+</div>
+<div id="navSheet" class="sheet" hidden>
+  <div class="sheetGrip"></div>
+  <div class="sheetTabs">
+    <button data-tab="toc">Chapters</button><button data-tab="marks">Bookmarks</button><button data-tab="search">Search</button><button data-tab="stats">Stats</button>
+  </div>
+  <div class="sheetBody" id="navBody"></div>
 </div>
 
 <div id="boot">Loading Loud Reader…</div>
