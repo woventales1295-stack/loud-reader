@@ -96,6 +96,10 @@ const Reading = {
   },
   measure(){
     if (!Reader.words.length) return null;
+    if (Pager.on){
+      const i = Pager.firstWord(Pager.idx);
+      return Reader.mode === "pdf" ? { mode:"pdf", p:Pager.idx + 1, frac:0, i } : { mode:"text", i, off:0 };
+    }
     const line = this.topLine();
     if (Reader.mode === "pdf"){
       const p = this._firstPageBelow(line), w = Reader.pageWrappers[p]; if (!w) return null;
@@ -113,6 +117,7 @@ const Reading = {
   },
   restoreAnchor(a){
     if (!a || !Reader.words.length) return;
+    if (Pager.on){ Pager.showAnchor(a); return; }
     const rd = this.rd(), line = this.topLine();
     this.suspend++;
     try{
@@ -128,6 +133,7 @@ const Reading = {
   },
   // Run a layout-changing function while keeping the same text at the top of the screen.
   withAnchor(fn){
+    if (Pager.on){ const pa = this.measure() || this.anchor; fn(); Pager.relayout(pa); return; }
     const a = this.measure() || this.anchor;
     fn();
     if (a) this.restoreAnchor(a);
@@ -140,6 +146,13 @@ const Reading = {
     opts = opts || {};
     if (!Reader.words.length) return;
     i = clamp(i, 0, Reader.words.length - 1);
+    if (Pager.on){
+      Pager.goto(Pager.pageOfWord(i), !!opts.smooth);
+      this.pos = i;
+      if (!opts.noAudio && Speech.playing){ Speech.jump(Reader.sentStart[i]); }
+      else if (!opts.noAudio){ Speech.cursor = Reader.sentStart[i]; }
+      this.updateProgressUI(); return;
+    }
     const rd = this.rd(), line = this.topLine() + 4; let top = null;
     if (Reader.mode === "pdf"){
       const w = Reader.words[i], p = w.page != null ? w.page : 1, wr = Reader.pageWrappers[p]; if (!wr) return;
@@ -158,80 +171,10 @@ const Reading = {
     else if (!opts.noAudio){ Speech.cursor = Reader.sentStart[i]; }
     this.updateProgressUI();
   },
-  // bottom edge of the reading area: above the footer when the bars are showing
-  usableBottom(){
-    const rr = this.rd().getBoundingClientRect(), f = document.querySelector("footer");
-    const fh = (f && !this.chromeHidden() && document.body.classList.contains("reading")) ? f.offsetHeight : 0;
-    return rr.bottom - fh - 4;
-  },
-  // flip mode layout: fit a whole PDF page on screen, and hide any half-visible last line
-  layoutFlip(){
-    const rd = this.rd(), c = $("#content");
-    const on = !!RS.flip && document.body.classList.contains("reading");
-    document.body.classList.toggle("flipfit", on && Reader.mode === "pdf");
-    if (!on){ rd.style.clipPath = ""; c.style.removeProperty("--flipw"); return; }
-    const rr = rd.getBoundingClientRect(), line = this.topLine(), bottom = this.usableBottom();
-    if (Reader.mode === "pdf"){
-      const m = this.measure(), p = m ? m.p : 1;
-      const pw = Reader.pagePtWidth[p] || Reader.pagePtWidth[1] || 612, ph = Reader.pagePtHeight[p] || Reader.pagePtHeight[1] || 792;
-      const availW = rd.clientWidth - 12, availH = bottom - line;
-      const fitW = Math.max(120, Math.min(availW, availH * pw / ph - 2));
-      const cur = parseFloat(c.style.getPropertyValue("--flipw")) || 0;
-      if (Math.abs(cur - fitW) > 1){ this.withAnchor(() => c.style.setProperty("--flipw", fitW + "px")); }
-      const wr = m && Reader.pageWrappers[m.p];
-      if (wr && RS.pdfZoom <= 1.01){
-        const pr = wr.getBoundingClientRect();
-        rd.style.clipPath = "inset(" + Math.max(0, pr.top - rr.top - 1) + "px 0 " + Math.max(0, rr.bottom - pr.bottom - 1) + "px 0)";
-      } else rd.style.clipPath = "";
-      return;
-    }
-    c.style.removeProperty("--flipw");
-    const a = this.measure(); if (!a) return;
-    let lo = a.i, hi = Reader.words.length - 1, ans = -1;
-    while (lo <= hi){ const mid = (lo + hi) >> 1, sp = Reader.words[mid].span; if (!sp){ hi = mid - 1; continue; }
-      if (sp.getBoundingClientRect().bottom > bottom){ ans = mid; hi = mid - 1; } else lo = mid + 1; }
-    if (ans >= 0){ const t = Reader.words[ans].span.getBoundingClientRect().top; rd.style.clipPath = t < bottom ? "inset(0 0 " + Math.max(0, rr.bottom - t + 2) + "px 0)" : ""; }
-    else rd.style.clipPath = "";
-  },
-  flipActive(){ return !!RS.flip && !(Reader.mode === "pdf" && RS.pdfZoom > 1.01); },
-  // slide the page in from the side after a flip jump
-  _flipFx(dir){
-    try{ $("#content").animate([{ transform:"translateX(" + (dir * 36) + "px)", opacity:0.15 }, { transform:"none", opacity:1 }], { duration:190, easing:"ease-out" }); }catch(e){}
-  },
+  flipActive(){ return Pager.on; },
   pageTurn(dir){
-    const rd = this.rd(), h = rd.clientHeight - this.inset() - 28, flip = this.flipActive();
-    if (flip){
-      const before = rd.scrollTop;
-      if (Reader.mode === "pdf"){
-        const line = this.topLine(), cur = this._firstPageBelow(line), w = Reader.pageWrappers[cur];
-        if (w){
-          const r = w.getBoundingClientRect(), n = Reader.totalPages || Object.keys(Reader.pageWrappers).length;
-          const target = clamp(dir > 0 ? cur + 1 : ((r.top < line - 8) ? cur : cur - 1), 1, n), tw = Reader.pageWrappers[target];
-          if (tw){ this.suspend++; rd.scrollTop += tw.getBoundingClientRect().top - (line - 2); setTimeout(()=>{ this.suspend = Math.max(0, this.suspend - 1); this.update(true); }, 40); }
-        }
-      } else {
-        const line = this.topLine(), bottom = this.usableBottom(), n = Reader.words.length;
-        const firstWhere = (pred, from) => { let lo = from, hi = n - 1, ans = -1;
-          while (lo <= hi){ const mid = (lo + hi) >> 1, sp = Reader.words[mid].span; if (!sp){ hi = mid - 1; continue; }
-            if (pred(sp.getBoundingClientRect())){ ans = mid; hi = mid - 1; } else lo = mid + 1; }
-          return ans; };
-        const a = this.measure(), cur = a ? a.i : 0;
-        if (dir > 0){
-          // the first line that is not fully on screen becomes the top line: nothing is skipped
-          let i = firstWhere(r => r.bottom > bottom, cur);
-          if (i >= 0){ const sp = Reader.words[i].span; let d = sp.getBoundingClientRect().top - line - 2; if (d < 8) d = bottom - line - 4; rd.scrollTop += d; }
-        } else {
-          // go back one screenful, snapping to a line start so the previous page's last line is not cut
-          const want = line - (bottom - line) + 2;
-          let i = firstWhere(r => r.top >= want, 0);
-          if (i >= 0){ const sp = Reader.words[i].span; const d = sp.getBoundingClientRect().top - line - 2; rd.scrollTop += Math.min(d, -8); }
-        }
-      }
-      if (rd.scrollTop !== before){ this._flipFx(dir); this.update(true); }
-      else toast(dir > 0 ? "End of book" : "Start of book", 700);
-      requestAnimationFrame(() => this.layoutFlip());
-      return;
-    }
+    if (Pager.on){ Pager.turn(dir); return; }
+    const rd = this.rd(), h = rd.clientHeight - this.inset() - 28;
     if (Reader.mode === "pdf"){
       rd.scrollBy({ top: dir * h * 0.92, behavior:"smooth" }); return;
     }
@@ -251,6 +194,7 @@ const Reading = {
   /* --- visible? --- */
   isWordVisible(i, strict){
     const w = Reader.words[i]; if (!w) return false;
+    if (Pager.on) return Pager.pageOfWord(i) === Pager.idx;
     const r = this.rd().getBoundingClientRect(), top = r.top + (strict ? this.inset() : 0), bot = r.bottom - (strict ? 60 : 0);
     if (Reader.mode === "pdf"){
       const wr = Reader.pageWrappers[w.page]; if (!wr) return false;
@@ -290,7 +234,8 @@ const Reading = {
     const left = this.minutesLeft();
     $("#posLabel").textContent = pct + "%";
     let hint = "";
-    if (Reader.totalPages > 1){
+    if (Pager.on){ hint = "Page " + (Pager.idx + 1) + " of " + Pager.count; }
+    else if (Reader.totalPages > 1){
       const pg = Reader.mode === "pdf" ? (this.anchor && this.anchor.p) : (Reader.words[i] && Reader.words[i].page);
       if (pg) hint = "Page " + pg + " of " + Reader.totalPages;
     }
@@ -476,7 +421,7 @@ const Reading = {
     document.body.classList.toggle("pdfmode", reading && Reader.mode === "pdf");
     $("#content").classList.toggle("pdfmode", Reader.mode === "pdf");
     $("#hdrTitleBtn").hidden = !reading;
-    document.body.classList.toggle("flipping", reading && this.flipActive());
+    Pager.sync();
     if (!reading){ document.body.classList.remove("chrome-hidden"); this.stopAuto(); }
     $("#hdrTitle").textContent = (currentDoc && UI.activeId != null) ? ($("#docTitle").textContent || "") : "";
     this.keepAwake();
@@ -488,7 +433,6 @@ const Reading = {
   setChrome(show){
     document.body.classList.toggle("chrome-hidden", !show);
     if (!show){ $("#moreMenu").hidden = true; }
-    setTimeout(() => this.layoutFlip(), 260);
   },
 
   /* --- tap handling: middle toggles bars, edges turn pages --- */
@@ -514,7 +458,8 @@ const Reading = {
   /* --- auto-scroll --- */
   _auto:false, _autoRAF:0, _autoLast:0, _autoAcc:0, _autoPaused:false,
   startAuto(){
-    if (!Reader.words.length) return; this._auto = true; this._autoLast = 0; this._autoAcc = 0;
+    if (!Reader.words.length) return;
+    if (Pager.on){ toast("Auto-scroll works in Scroll page style"); return; } this._auto = true; this._autoLast = 0; this._autoAcc = 0;
     this.setChrome(false); $("#autoChip").hidden = false; this._autoLabel(); this.keepAwake();
     const step = (t) => {
       if (!this._auto) return;
@@ -575,7 +520,7 @@ $("#reader").addEventListener("scroll", () => {
     _scrRAF = 0; const rd = $("#reader"), st = rd.scrollTop;
     // hide the bars when the reader scrolls down on their own (like a book: out of the way)
     if (Reading.userTouching && st > Reading.lastScrollTop + 14 && document.body.classList.contains("reading") && !Reading.chromeHidden()) Reading.setChrome(false);
-    Reading.lastScrollTop = st; Reading.update(); if (Annot.selecting && Annot.reposition) Annot.reposition(); if (RS.flip && Reading.flipActive() && Reader.mode === "text" && !Reading._clipT) Reading._clipT = setTimeout(() => { Reading._clipT = 0; Reading.layoutFlip(); }, 60);
+    Reading.lastScrollTop = st; Reading.update(); if (Annot.selecting && Annot.reposition) Annot.reposition();
   });
 }, { passive:true });
 // manual scrolling (finger / wheel / keys) detaches the page from the voice
@@ -585,23 +530,6 @@ $("#reader").addEventListener("touchend", _touchEnd, { passive:true });
 $("#reader").addEventListener("touchcancel", _touchEnd, { passive:true });
 $("#reader").addEventListener("touchmove", () => { if (!Reading.pinching) Follow.userScrolled(); }, { passive:true });
 $("#reader").addEventListener("wheel", (e) => { if (!e.ctrlKey) Follow.userScrolled(); }, { passive:true });
-
-/* swipe to flip pages */
-let _sw = null;
-$("#reader").addEventListener("touchstart", (e) => {
-  _sw = (e.touches.length === 1 && Reading.flipActive() && !Annot.selecting && !SelDrag.mode && !Ink.active) ? { x:e.touches[0].clientX, y:e.touches[0].clientY, t:Date.now() } : null;
-}, { passive:true });
-$("#reader").addEventListener("touchend", (e) => {
-  const s0 = _sw; _sw = null; if (!s0 || Reading.pinching || SelDrag.mode || _lpFired) return;
-  const t = e.changedTouches[0], dx = t.clientX - s0.x, dy = t.clientY - s0.y, dt = Date.now() - s0.t;
-  if (dt > 800) return;
-  let dir = 0;
-  if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy) * 1.3) dir = dx < 0 ? 1 : -1;
-  else if (Math.abs(dy) > 60 && Math.abs(dy) > Math.abs(dx) * 1.3) dir = dy < 0 ? 1 : -1;
-  if (!dir) return;
-  Reading.stopAuto(true); Reading.pageTurn(dir); Follow.userScrolled();
-  _suppressNextClick = true; clearTimeout(_suppressClickT); _suppressClickT = setTimeout(() => { _suppressNextClick = false; }, 350);
-}, { passive:true });
 
 /* tap routing: replaces the old "tap a word = start speaking" behaviour */
 $("#reader").addEventListener("click", (e) => {
@@ -613,7 +541,7 @@ $("#reader").addEventListener("click", (e) => {
 let _pz = null;
 function _dist(t){ return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY); }
 $("#reader").addEventListener("touchstart", (e) => {
-  if (e.touches.length !== 2) return;
+  if (e.touches.length !== 2 || Pager.on) return;
   clearTimeout(_lpTimer); _lpTimer = null;
   const rd = $("#reader"), c = $("#content"), rr = rd.getBoundingClientRect();
   const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2, cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
@@ -652,7 +580,8 @@ $("#reader").addEventListener("touchcancel", _pinchEnd, { passive:true });
 $("#reader").addEventListener("wheel", (e) => {
   if (!e.ctrlKey && !e.metaKey) return; e.preventDefault();
   const f = e.deltaY < 0 ? 1.08 : 1 / 1.08;
-  if (Reader.mode === "pdf") Settings.zoomPdf(RS.pdfZoom * f, { cx:e.clientX, cy:e.clientY });
+  if (Pager.on && Reader.mode === "pdf") Pager.setZoom(clamp(Pager.z * f, 1, 5), { cx:e.clientX, cy:e.clientY });
+  else if (Reader.mode === "pdf") Settings.zoomPdf(RS.pdfZoom * f, { cx:e.clientX, cy:e.clientY });
   else Settings.set("fs", Math.round(clamp(RS.fs * f, 12, 48)));
 }, { passive:false });
 
@@ -674,8 +603,7 @@ const Settings = {
     if (!document.documentElement.lang) document.documentElement.lang = "en";
     $("#fontSize") && ($("#fontSize").value = RS.fs);
     try{ if (Native.has) AndroidBridge.setVolumeKeyPaging(!!RS.volKeys); }catch(e){}
-    document.body.classList.toggle("flipping", Reading.flipActive());
-    Reading.keepAwake(); requestAnimationFrame(() => Reading.layoutFlip());
+    Reading.keepAwake(); Pager.sync();
   },
   set(key, val){
     RS[key] = val;
@@ -685,6 +613,7 @@ const Settings = {
     this.save();
   },
   zoomPdf(z, p){
+    if (Pager.on){ Pager.setZoom(clamp(z, 1, 5), p); return; }
     z = clamp(z, 1, 4); if (Math.abs(z - RS.pdfZoom) < 0.01) return;
     const rd = $("#reader"), c = $("#content");
     const rr = rd.getBoundingClientRect(), cr0 = c.getBoundingClientRect();
@@ -721,14 +650,14 @@ const Settings = {
       rng("mx", 0, 22, 1, "Side margins", v => v + "%") +
       '<div class="setRow"><label>Align</label>' + seg("align", [["left","Left"],["justify","Justify"]]) + '</div>' +
       tog("hyphen", "Hyphenate words") +
-      (Reader.mode === "pdf" ? '<div class="setTitle">PDF page</div>' + rng("pdfZoom", 1, 4, 0.1, "Zoom", v => Math.round(v * 100) + "%") + '<div class="setRow"><span class="lbl"></span><div class="seg"><button data-fit="1">Fit width</button><button data-fit="1.5">150%</button><button data-fit="2">200%</button></div></div>' : '') +
+      (Reader.mode === "pdf" && !Pager.on ? '<div class="setTitle">PDF page</div>' + rng("pdfZoom", 1, 4, 0.1, "Zoom", v => Math.round(v * 100) + "%") + '<div class="setRow"><span class="lbl"></span><div class="seg"><button data-fit="1">Fit width</button><button data-fit="1.5">150%</button><button data-fit="2">200%</button></div></div>' : '') +
       '<div class="setTitle">Screen</div>' +
       rng("dim", 0, 0.7, 0.05, "Dim", v => Math.round(v * 100) + "%") +
       rng("warm", 0, 0.5, 0.05, "Warm light", v => Math.round(v * 200) + "%") +
       tog("keepOn", "Keep screen on while reading") +
       '<div class="setTitle">Turning pages</div>' +
       '<div class="setRow"><label>Page style</label>' + seg("flip", [["false","Scroll"],["true","Flip pages"]]) + '</div>' +
-      (RS.flip ? '<div class="setRow"><span class="lbl" style="font-size:12px;opacity:.7">Swipe or tap the screen edges to flip. Pinch to zoom still works.</span></div>' : '') +
+      (RS.flip ? '<div class="setRow"><span class="lbl" style="font-size:12px;opacity:.7">Swipe or tap the screen edges to turn pages. ' + (Reader.mode === "pdf" ? 'Pinch to zoom a page, drag to pan, and pinch back out to flip again.' : 'Pinch to change text size.') + '</span></div>' : '') +
       tog("tapZones", "Tap the screen edges to turn pages (centre shows/hides bars)") +
       tog("volKeys", "Use volume keys to turn pages") +
       '<div class="setRow"><label>Auto-scroll</label><div class="seg"><button data-auto="1">' + (Reading._auto ? "Stop" : "Start") + '</button></div></div>' +
@@ -955,4 +884,4 @@ $("#autoFaster").onclick = () => { RS.autoSpeed = clamp(RS.autoSpeed + 1, 1, 30)
 $("#autoSlower").onclick = () => { RS.autoSpeed = clamp(RS.autoSpeed - 1, 1, 30); Reading._autoLabel(); Settings.save(); };
 $("#autoStop").onclick = () => Reading.stopAuto();
 
-Settings.load();
+

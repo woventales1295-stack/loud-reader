@@ -376,8 +376,19 @@
   .selHandle[hidden]{display:none}
   .selHandle::after{content:""; position:absolute; left:4px; top:8px; width:20px; height:20px; border-radius:50% 50% 50% 4px; transform:rotate(-45deg); background:#6a45ff; box-shadow:0 1px 4px rgba(0,0,0,.4)}
   .selHandle[data-k="b"]::after{border-radius:50% 4px 50% 50%; transform:rotate(45deg)}
-  body.flipping #reader{overflow-y:hidden; touch-action:none}
-  body.flipping.pdfmode #reader{overflow-x:hidden}
+  /* v2.6: real paged mode (Apple Books style): pages sit side by side and slide */
+  body.paged main{min-width:0; max-width:100vw; overflow:hidden}
+  body.paged #reader{min-width:0; max-width:100%; contain:layout paint; overflow:hidden !important; padding:0 !important; touch-action:none; scroll-behavior:auto}
+  body.paged #content{max-width:none !important; position:relative; transform-origin:0 0; will-change:transform; backface-visibility:hidden}
+  body.paged #content:not(.pdfmode){column-fill:auto; margin-left:0}
+  body.paged #content p{orphans:2; widows:2}
+  body.paged #content p.k-h1,body.paged #content p.k-h2,body.paged #content p.k-h3{break-after:avoid}
+  body.paged #content.pdfmode{display:flex; flex-direction:row; align-items:center; width:auto}
+  body.paged #content .pdfpage{flex:none; margin:0; box-shadow:0 1px 10px rgba(0,0,0,.28)}
+  body.paged #content .welcome{break-inside:avoid}
+  #pagerNum{position:fixed; left:0; right:0; bottom:calc(6px + env(safe-area-inset-bottom)); text-align:center; font-size:12px; color:var(--muted); opacity:.8; pointer-events:none; z-index:5}
+  #pagerNum[hidden]{display:none}
+  body.paged:not(.chrome-hidden) #pagerNum{opacity:0}
 
   /* v2.3.1: structural blocks (headings, quotes, lists) from EPUB/DOCX/HTML */
   #content p.k-h1,#content p.k-h2,#content p.k-h3,#content p.k-h4,#content p.k-h5,#content p.k-h6{font-weight:700; text-align:left; line-height:1.3; margin:1.1em 0 .6em; hyphens:manual}
@@ -386,6 +397,4 @@
   #content p.k-li{margin-left:1.3em; position:relative; margin-bottom:.4em}
   #content p.k-li::before{content:"\2022"; position:absolute; left:-.9em}
   #content p.k-pre{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.9em; text-align:left; margin-bottom:.2em}
-  body.flipfit #content.pdfmode{width:calc(var(--flipw,100%) * var(--pdfzoom,1)); max-width:none; margin:0 auto}
-  body.flipping #reader{-webkit-mask:none}
 </style>

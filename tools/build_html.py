@@ -17,7 +17,7 @@ libs += '<script type="text/b64" id="lib-unrar">%s</script>\n' % b64("unrar_bund
 libs += '<script type="text/b64" id="unrar-wasm">%s</script>\n' % b64("unrar.wasm")
 app = rd("app.js")
 assert "/*__READING_JS__*/" in app
-app = app.replace("/*__READING_JS__*/", rd("reading.js"))
+app = app.replace("/*__READING_JS__*/", rd("reading.js") + "\n" + rd("pager.js"))
 html = head + "\n" + body + "\n" + libs + app
 os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
 open(out, "w", encoding="utf-8").write(html)

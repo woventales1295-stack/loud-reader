@@ -1165,7 +1165,7 @@ const Reader = {
         if (entry.isIntersecting){ if (wrapper.dataset.rendered!=="1") renderPageCanvas(wrapper,p); }
         else if (wrapper.dataset.rendered==="1"){ clearPageCanvas(wrapper); }
       });
-    }, { root: $("#reader"), rootMargin: "120% 0px 120% 0px" });
+    }, { root: $("#reader"), rootMargin: "120% 100% 120% 100%" });
     Object.values(this.pageWrappers).forEach(w=>this._io.observe(w));
   },
 
@@ -1213,12 +1213,15 @@ async function renderPageCanvas(wrapper, pageNum){
   wrapper.dataset.rendering="1";
   try{
     const page = await Reader.pdfProxy.getPage(pageNum);
-    const cssWidth = wrapper.clientWidth || 800;
     const vp1 = page.getViewport({scale:1});
+    Reader.pagePtWidth[pageNum]=vp1.width; Reader.pagePtHeight[pageNum]=vp1.height;
+    if (Pager.on) Pager.fitWrapper(wrapper, pageNum);
+    const cssWidth = wrapper.clientWidth || 800;
     const displayScale = cssWidth / vp1.width;
     Reader.pagePtWidth[pageNum]=vp1.width; Reader.pagePtHeight[pageNum]=vp1.height;
-    wrapper.style.paddingTop=(vp1.height/vp1.width*100)+"%";
-    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio||1, 3200/cssWidth)); // capped to bound memory (also when zoomed in)
+    if(!Pager.on) wrapper.style.paddingTop=(vp1.height/vp1.width*100)+"%"; else wrapper.dataset.pt=(vp1.height/vp1.width*100)+"%";
+    const boost = (Pager.on && Pager.z>1) ? Pager.z : 1;
+    const dpr = Math.max(1, Math.min(Math.min(2, window.devicePixelRatio||1)*boost, 3200/cssWidth)); // capped to bound memory
     const vp = page.getViewport({scale: displayScale*dpr});
     const canvas = wrapper.querySelector("canvas");
     canvas.width = Math.round(vp.width); canvas.height = Math.round(vp.height);
@@ -1317,7 +1320,8 @@ let lastHi=-1;
 // and skipping the call entirely when already comfortably in view fixes that.
 let _scrollRAF=0, _scrollTarget=null;
 function smoothScrollIntoViewIfNeeded(target){
-  if(!Follow.shouldScroll()) return;   // reading position is the user's; audio only drives the view while "follow" is on
+  if(!Follow.shouldScroll()) return;
+  if(Pager.on){ Pager.followTarget(target); return; }   // reading position is the user's; audio only drives the view while "follow" is on
   _scrollTarget=target;
   if(_scrollRAF) return;
   _scrollRAF=requestAnimationFrame(()=>{
@@ -1816,7 +1820,7 @@ $("#pageGoBtn").onclick=goToPage;
 
 let _resizeSettleT=0, _lastReaderW=0;
 function handleReaderResize(force){
-  if (typeof Reading!=="undefined" && Reading.layoutFlip) Reading.layoutFlip();
+  if (typeof Pager!=="undefined" && Pager.on){ Pager.onResize(); return; }
   if (Reader.mode!=="pdf"){ _lastReaderW=$("#reader").clientWidth; return; }
   const rw=$("#reader").clientWidth;
   const widthChanged = force===true || Math.abs(rw-_lastReaderW)>1; _lastReaderW=rw;
@@ -1880,7 +1884,7 @@ function wordIndexAtEvent(e){
   const p=Number(wrapper.dataset.page);
   const canvas=wrapper.querySelector("canvas"); if(!canvas) return null;
   const rect=canvas.getBoundingClientRect();
-  const scale=Reader.pageDisplayScale[p] || (rect.width/(Reader.pagePtWidth[p]||612));
+  const scale=rect.width/(Reader.pagePtWidth[p]||612);
   const px=(e.clientX-rect.left)/scale, py=(e.clientY-rect.top)/scale;
   return Reader.wordIndexNearPoint(p, px, py);
 }
@@ -2054,7 +2058,7 @@ function wordIndexStrict(e){
   const idx=wordIndexAtEvent(e); if (idx==null) return null;
   const w=Reader.words[idx]; const hit=document.elementFromPoint(e.clientX,e.clientY); const wr=hit&&hit.closest&&hit.closest(".pdfpage"); if(!wr||!w) return null;
   const p=Number(wr.dataset.page), cv=wr.querySelector("canvas"); if(!cv) return null;
-  const rc=cv.getBoundingClientRect(); const sc=Reader.pageDisplayScale[p]||(rc.width/(Reader.pagePtWidth[p]||612));
+  const rc=cv.getBoundingClientRect(); const sc=rc.width/(Reader.pagePtWidth[p]||612);
   const px=(e.clientX-rc.left)/sc, py=(e.clientY-rc.top)/sc;
   const pad=Math.max(4,w.h*0.5);
   return (px>=w.x-pad && px<=w.x+w.w+pad && py>=w.y-pad && py<=w.y+w.h+pad) ? idx : null;
@@ -2064,7 +2068,7 @@ function wordClientRect(i){
   if (Reader.mode==="text") return w.span ? w.span.getBoundingClientRect() : null;
   const wr=Reader.pageWrappers[w.page]; if(!wr||w.x==null) return null;
   const cv=wr.querySelector("canvas"); const rc=(cv||wr).getBoundingClientRect();
-  const sc=Reader.pageDisplayScale[w.page]||(rc.width/(Reader.pagePtWidth[w.page]||612));
+  const sc=rc.width/(Reader.pagePtWidth[w.page]||612);
   return {left:rc.left+w.x*sc, right:rc.left+(w.x+w.w)*sc, top:rc.top+w.y*sc, bottom:rc.top+(w.y+w.h)*sc};
 }
 const SelDrag = {
@@ -2098,7 +2102,7 @@ const SelDrag = {
     if (idx!=null){ Annot.startIdx=this.anchor; Annot.extendSelection(idx); this.position(); }
     const rr=$("#reader").getBoundingClientRect();
     this.edge = this.y<rr.top+80 ? -1 : (this.y>rr.bottom-80 ? 1 : 0);
-    if (this.edge && !this.scrollT) this.scrollT=setInterval(()=>{ if(!this.edge||!this.mode){ clearInterval(this.scrollT); this.scrollT=0; return; }
+    if (this.edge && !this.scrollT && !Pager.on) this.scrollT=setInterval(()=>{ if(!this.edge||!this.mode){ clearInterval(this.scrollT); this.scrollT=0; return; }
       $("#reader").scrollTop += this.edge*14; this.move(); }, 30);
   },
   end(){
@@ -2417,7 +2421,7 @@ setInterval(()=>{ if(Speech.playing&&speechSynthesis.speaking&&!speechSynthesis.
 /*__READING_JS__*/
 Shelf.show(false);
 
-window.__LoudReader = { Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
+window.__LoudReader = { Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
 } /* end appInit */
 </script>
 </body>
