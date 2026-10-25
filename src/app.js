@@ -553,12 +553,53 @@ function htmlToBlocks(html, opts){
     return false;
   }
 
-  const blocks=[]; const nodes = doc.body ? doc.body.querySelectorAll("p,h1,h2,h3,h4,h5,h6,li,blockquote,td,pre") : [];
-  if (nodes.length) nodes.forEach(n=>{
-    const t=(n.textContent||"").replace(/\s+/g," ").trim(); if(!t) return;
-    blocks.push({ text:t, role: isFootnoteNode(n) ? "footnote" : "body" });
+  // Structural walk: every piece of text is emitted exactly once, in document order, as
+  // its own paragraph. (The old "querySelectorAll(p,li,blockquote,td…)" approach duplicated
+  // text whenever blocks nested -- <li><p>, <blockquote><p>, <td><p> -- and silently dropped
+  // text that sat directly in a <div> or after a <br>, which is how many converted EPUBs are built.)
+  doc.querySelectorAll("nav,svg,img,audio,video,object,canvas,rt,[hidden]").forEach(n=>{
+    if (n.tagName==="NAV" && !/toc|landmarks|page-list/i.test(n.getAttribute("epub:type")||n.getAttribute("role")||"")) { /* plain <nav> still dropped: it is chrome, not prose */ }
+    n.remove();
   });
-  else { const t=(doc.body?doc.body.textContent:"").replace(/\s+/g," ").trim(); if(t) blocks.push({text:t, role:"body"}); }
+  const BLOCK=new Set("P H1 H2 H3 H4 H5 H6 LI BLOCKQUOTE TD TH PRE DIV SECTION ARTICLE ASIDE UL OL TABLE TBODY THEAD TFOOT TR DL DT DD FIGURE FIGCAPTION HEADER FOOTER MAIN BODY FORM ADDRESS DETAILS SUMMARY CENTER HGROUP".split(" "));
+  const BLOCK_SEL="p,h1,h2,h3,h4,h5,h6,li,blockquote,td,th,pre,div,section,article,aside,ul,ol,table,tr,dl,dt,dd,figure,figcaption,details,center";
+  const kindFor=(tag,inherit)=>{
+    if (/^H[1-6]$/.test(tag)) return "h"+tag[1];
+    if (tag==="BLOCKQUOTE") return "quote";
+    if (tag==="LI"||tag==="DT"||tag==="DD") return "li";
+    if (tag==="PRE") return "pre";
+    if (tag==="P"||tag==="DIV"||tag==="TD"||tag==="TH") return (inherit==="li"||inherit==="quote") ? inherit : undefined;
+    return inherit;
+  };
+  const blocks=[];
+  function walk(n, kind){
+    let run=[];
+    const flush=()=>{
+      const t=run.join("").replace(/\s+/g," ").trim(); run=[];
+      if (!t) return;
+      const blk={ text:t, role: isFootnoteNode(n) ? "footnote" : "body" };
+      if (kind) blk.kind=kind;
+      blocks.push(blk);
+    };
+    n.childNodes.forEach(c=>{
+      if (c.nodeType===3){ run.push(c.nodeValue); return; }
+      if (c.nodeType!==1) return;
+      const tag=c.tagName;
+      if (tag==="HR"){ flush(); return; }
+      if (tag==="BR"){
+        // a <br> mid-sentence (hard-wrapped lines from converted books) is just a space;
+        // after a finished sentence, a short line (verse) or a doubled <br> it ends the paragraph
+        const cur=run.join("").replace(/\s+/g," ").trim();
+        if (!cur || cur.length<45 || /[.!?\u2026:;"\u201d\u2019)\]]$/.test(cur) || (c.previousSibling && c.previousSibling.nodeName==="BR")) flush(); else run.push(" ");
+        return;
+      }
+      if (BLOCK.has(tag) || (c.querySelector && c.querySelector(BLOCK_SEL))){ flush(); walk(c, kindFor(tag, kind)); }
+      else run.push(c.textContent);
+    });
+    flush();
+  }
+  if (doc.body) walk(doc.body, undefined);
+  if (!blocks.length){ const t=(doc.body?doc.body.textContent:"").replace(/\s+/g," ").trim(); if(t) blocks.push({text:t, role:"body"}); }
   return blocks;
 }
 /* ---------- v2 formats: TXT / Markdown / FB2 / HTML / MOBI / comics ---------- */
@@ -1010,7 +1051,7 @@ const Reader = {
         if (b.page!==lastPage){ if(this.pageStartWord[b.page]==null) this.pageStartWord[b.page]=this.words.length; lastPage=b.page; }
         if (b.page>this.totalPages) this.totalPages=b.page;
       }
-      const p=el("p"); if(role!=="body") p.className="aux";
+      const p=el("p"); if(role!=="body") p.className="aux"; if(b.kind) p.classList.add("k-"+b.kind);
       if (hasWords){
         b.words.forEach((w,idx)=>{
           if (idx>0) p.appendChild(document.createTextNode(" "));
