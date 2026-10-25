@@ -1978,30 +1978,105 @@ function suppressNextClick(){
   clearTimeout(_suppressClickT);
   _suppressClickT=setTimeout(()=>{ _suppressNextClick=false; }, 400);
 }
+/* ---- press-and-drag selection (long-press a word, drag to extend; handles to adjust) ---- */
+// strict hit-test: a press must be ON a word (or within a hair of one), never on blank space
+function wordIndexStrict(e){
+  if (Reader.mode==="text"){
+    for (const dx of [0,-5,5]){
+      const hit=document.elementFromPoint(e.clientX+dx, e.clientY); const sp=hit&&hit.closest&&hit.closest(".w");
+      if (sp) return parseInt(sp.dataset.i,10);
+    }
+    return null;
+  }
+  const idx=wordIndexAtEvent(e); if (idx==null) return null;
+  const w=Reader.words[idx]; const hit=document.elementFromPoint(e.clientX,e.clientY); const wr=hit&&hit.closest&&hit.closest(".pdfpage"); if(!wr||!w) return null;
+  const p=Number(wr.dataset.page), cv=wr.querySelector("canvas"); if(!cv) return null;
+  const rc=cv.getBoundingClientRect(); const sc=Reader.pageDisplayScale[p]||(rc.width/(Reader.pagePtWidth[p]||612));
+  const px=(e.clientX-rc.left)/sc, py=(e.clientY-rc.top)/sc;
+  const pad=Math.max(4,w.h*0.5);
+  return (px>=w.x-pad && px<=w.x+w.w+pad && py>=w.y-pad && py<=w.y+w.h+pad) ? idx : null;
+}
+function wordClientRect(i){
+  const w=Reader.words[i]; if(!w) return null;
+  if (Reader.mode==="text") return w.span ? w.span.getBoundingClientRect() : null;
+  const wr=Reader.pageWrappers[w.page]; if(!wr||w.x==null) return null;
+  const cv=wr.querySelector("canvas"); const rc=(cv||wr).getBoundingClientRect();
+  const sc=Reader.pageDisplayScale[w.page]||(rc.width/(Reader.pagePtWidth[w.page]||612));
+  return {left:rc.left+w.x*sc, right:rc.left+(w.x+w.w)*sc, top:rc.top+w.y*sc, bottom:rc.top+(w.y+w.h)*sc};
+}
+const SelDrag = {
+  mode:null, anchor:null, timer:0, edge:0, x:0, y:0, startX:0, startY:0, pid:null,
+  handles:null,
+  ensureHandles(){
+    if (this.handles) return;
+    this.handles=["a","b"].map(k=>{ const h=el("div"); h.className="selHandle"; h.dataset.k=k; h.hidden=true; document.body.appendChild(h);
+      h.addEventListener("pointerdown",(e)=>{ e.preventDefault(); e.stopPropagation();
+        const [lo,hi]=Annot.range(); this.anchor = (k==="a") ? hi : lo; this.mode="handle"; this.pid=e.pointerId;
+        try{ h.setPointerCapture(e.pointerId); }catch(_){}
+        this.x=e.clientX; this.y=e.clientY; });
+      h.addEventListener("pointermove",(e)=>{ if(this.mode!=="handle") return; this.x=e.clientX; this.y=e.clientY-26; this.move(); });
+      const up=()=>{ if(this.mode==="handle") this.end(); };
+      h.addEventListener("pointerup",up); h.addEventListener("pointercancel",up);
+      return h; });
+  },
+  position(){
+    this.ensureHandles();
+    const show = Annot.selecting && Annot.startIdx!=null;
+    if (!show){ this.handles.forEach(h=>h.hidden=true); return; }
+    const [lo,hi]=Annot.range(); const r1=wordClientRect(lo), r2=wordClientRect(hi);
+    const rr=$("#reader").getBoundingClientRect();
+    const put=(h,r,x)=>{ if(!r || r.bottom<rr.top || r.top>rr.bottom){ h.hidden=true; return; } h.hidden=false; h.style.left=(x-14)+"px"; h.style.top=(r.bottom-2)+"px"; };
+    put(this.handles[0],r1,r1?r1.left:0); put(this.handles[1],r2,r2?r2.right:0);
+  },
+  move(){
+    const e={clientX:this.x, clientY:this.y};
+    let idx=wordIndexAtEvent(e);
+    if (idx==null && Reader.mode==="text"){ for(const dx of [-8,8,-16,16]){ idx=wordIndexAtEvent({clientX:this.x+dx,clientY:this.y}); if(idx!=null) break; } }
+    if (idx!=null){ Annot.startIdx=this.anchor; Annot.extendSelection(idx); this.position(); }
+    const rr=$("#reader").getBoundingClientRect();
+    this.edge = this.y<rr.top+80 ? -1 : (this.y>rr.bottom-80 ? 1 : 0);
+    if (this.edge && !this.scrollT) this.scrollT=setInterval(()=>{ if(!this.edge||!this.mode){ clearInterval(this.scrollT); this.scrollT=0; return; }
+      $("#reader").scrollTop += this.edge*14; this.move(); }, 30);
+  },
+  end(){
+    this.mode=null; this.edge=0; clearInterval(this.scrollT); this.scrollT=0; suppressNextClick(); this.position();
+    if (Annot.selecting) Annot._positionToolbar();
+  }
+};
+Annot.reposition=function(){ SelDrag.position(); };
+{ const _cs=Annot.cancelSelection, _ss=Annot.startSelection, _es=Annot.extendSelection;
+  Annot.cancelSelection=function(){ _cs.call(this); SelDrag.mode=null; SelDrag.position(); };
+  Annot.startSelection=function(i){ _ss.call(this,i); SelDrag.position(); };
+  Annot.extendSelection=function(i){ _es.call(this,i); SelDrag.position(); }; }
+
 $("#content").addEventListener("pointerdown",(e)=>{
   if (typeof Ink!=="undefined" && Ink.active) return; // stylus is drawing, not selecting
   if (e.pointerType==="mouse" && e.button!==0) return;
-  _lpFired=false; _lpStartX=e.clientX; _lpStartY=e.clientY;
+  if (!e.isPrimary){ clearTimeout(_lpTimer); _lpTimer=null; return; }   // second finger = pinch, not a press
+  _lpFired=false; _lpStartX=e.clientX; _lpStartY=e.clientY; SelDrag.x=e.clientX; SelDrag.y=e.clientY;
   clearTimeout(_lpTimer);
   _lpTimer=setTimeout(()=>{
+    _lpTimer=null;
+    const idx=wordIndexStrict({clientX:_lpStartX, clientY:_lpStartY});
+    if (idx==null) return;                          // pressed blank space: do nothing at all
     _lpFired=true;
-    const idx=wordIndexAtEvent(e);
-    if (idx!=null) Annot.startSelection(idx);
+    if (Annot.selecting) Annot.cancelSelection();
+    Annot.startSelection(idx); SelDrag.anchor=idx; SelDrag.mode="new";
+    try{ navigator.vibrate && navigator.vibrate(12); }catch(_){}
   }, LP_MS);
 });
 $("#content").addEventListener("pointermove",(e)=>{
+  if (SelDrag.mode==="new"){ SelDrag.x=e.clientX; SelDrag.y=e.clientY; SelDrag.move(); return; }
   if (!_lpTimer) return;
   if (Math.hypot(e.clientX-_lpStartX, e.clientY-_lpStartY) > LP_MOVE_TOL){ clearTimeout(_lpTimer); _lpTimer=null; }
 });
-$("#content").addEventListener("pointerup",(e)=>{
-  clearTimeout(_lpTimer); _lpTimer=null;
-  if (_lpFired){ suppressNextClick(); return; } // long-press already started a selection; don't also trigger tap-to-read
-  if (Annot.selecting){
-    const idx=wordIndexAtEvent(e);
-    if (idx!=null) Annot.extendSelection(idx);
-    suppressNextClick();
-  }
-});
+const _lpCancel=()=>{ clearTimeout(_lpTimer); _lpTimer=null; if(SelDrag.mode==="new") SelDrag.end(); };
+$("#content").addEventListener("pointerup",()=>{ clearTimeout(_lpTimer); _lpTimer=null; if (SelDrag.mode==="new") SelDrag.end(); else if (_lpFired) suppressNextClick(); });
+$("#content").addEventListener("pointercancel",_lpCancel);
+$("#reader").addEventListener("scroll",()=>{ if(Annot.selecting) SelDrag.position(); },{passive:true});
+// while dragging a selection the page must not scroll under the finger
+document.addEventListener("touchmove",(e)=>{ if(SelDrag.mode && e.cancelable) e.preventDefault(); },{passive:false});
+$("#content").addEventListener("contextmenu",(e)=>e.preventDefault());
 
 $("#annotToolbar").querySelectorAll(".swatch").forEach(btn=>{
   btn.addEventListener("click",()=>Annot.saveHighlight(btn.dataset.color));

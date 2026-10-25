@@ -21,7 +21,7 @@ const THEME_LIST = [
   { id:"black", name:"Black", bg:"#000000", fg:"#cfd3da" }
 ];
 const RS_DEFAULT = { font:"sans", fs:20, lh:1.8, ps:1.0, mx:6, align:"left", hyphen:false, dim:0, warm:0,
-  tapZones:true, volKeys:false, keepOn:true, tapWordRead:false, dimRead:false, pdfZoom:1, autoSpeed:6 };
+  tapZones:true, volKeys:false, keepOn:true, tapWordRead:false, dimRead:false, pdfZoom:1, autoSpeed:6, flip:false };
 const RS = Object.assign({}, RS_DEFAULT);
 const HDR_H = 56;
 
@@ -158,8 +158,38 @@ const Reading = {
     else if (!opts.noAudio){ Speech.cursor = Reader.sentStart[i]; }
     this.updateProgressUI();
   },
+  flipActive(){ return !!RS.flip && !(Reader.mode === "pdf" && RS.pdfZoom > 1.01); },
+  // slide the page in from the side after a flip jump
+  _flipFx(dir){
+    try{ $("#content").animate([{ transform:"translateX(" + (dir * 36) + "px)", opacity:0.15 }, { transform:"none", opacity:1 }], { duration:190, easing:"ease-out" }); }catch(e){}
+  },
   pageTurn(dir){
-    const rd = this.rd(), h = rd.clientHeight - this.inset() - 28;
+    const rd = this.rd(), h = rd.clientHeight - this.inset() - 28, flip = this.flipActive();
+    if (flip){
+      const before = rd.scrollTop;
+      if (Reader.mode === "pdf"){
+        const line = this.topLine(), cur = this._firstPageBelow(line), w = Reader.pageWrappers[cur];
+        if (w){
+          const r = w.getBoundingClientRect(), n = Reader.totalPages || Object.keys(Reader.pageWrappers).length;
+          let target = cur;
+          if (dir > 0) target = (r.top < line - 8) ? cur + 1 : cur + 1;
+          else target = (r.top < line - 8) ? cur : cur - 1;
+          target = clamp(target, 1, n); const tw = Reader.pageWrappers[target];
+          if (tw){ this.suspend++; rd.scrollTop += tw.getBoundingClientRect().top - (line - 2); setTimeout(()=>{ this.suspend = Math.max(0, this.suspend - 1); this.update(true); }, 40); }
+        }
+      } else {
+        const line = this.topLine();
+        if (dir > 0){
+          const a = this.measure(); let lo = a ? a.i : 0, hi = Reader.words.length - 1, ans = hi; const limit = line + h * 0.97;
+          while (lo <= hi){ const mid = (lo + hi) >> 1, sp = Reader.words[mid].span; if (!sp){ hi = mid - 1; continue; }
+            if (sp.getBoundingClientRect().top >= limit - 2){ ans = mid; hi = mid - 1; } else lo = mid + 1; }
+          const sp = Reader.words[ans].span; if (sp) rd.scrollTop += sp.getBoundingClientRect().top - line - 2;
+        } else rd.scrollTop -= h * 0.97;
+      }
+      if (rd.scrollTop !== before){ this._flipFx(dir); this.update(true); }
+      else toast(dir > 0 ? "End of book" : "Start of book", 700);
+      return;
+    }
     if (Reader.mode === "pdf"){
       rd.scrollBy({ top: dir * h * 0.92, behavior:"smooth" }); return;
     }
@@ -404,6 +434,7 @@ const Reading = {
     document.body.classList.toggle("pdfmode", reading && Reader.mode === "pdf");
     $("#content").classList.toggle("pdfmode", Reader.mode === "pdf");
     $("#hdrTitleBtn").hidden = !reading;
+    document.body.classList.toggle("flipping", reading && this.flipActive());
     if (!reading){ document.body.classList.remove("chrome-hidden"); this.stopAuto(); }
     $("#hdrTitle").textContent = (currentDoc && UI.activeId != null) ? ($("#docTitle").textContent || "") : "";
     this.keepAwake();
@@ -420,7 +451,7 @@ const Reading = {
   /* --- tap handling: middle toggles bars, edges turn pages --- */
   onTap(e){
     if (Reading.pinching || Ink.active) return;
-    if (Annot.selecting) return;
+    if (Annot.selecting){ Annot.cancelSelection(); return; }   // a tap away from a selection just dismisses it
     if (!Reader.words.length) return;
     if (window.getSelection && String(window.getSelection()).length > 0) return;
     // a tap on a note icon or an overlay control should keep its own behavior
@@ -432,7 +463,6 @@ const Reading = {
     }
     this.stopAuto(true);
     const w = window.innerWidth, x = e.clientX;
-    if (RS.tapZones && !this.chromeHidden() === false){ /* fallthrough */ }
     if (RS.tapZones && x < w * 0.22){ this.pageTurn(-1); Follow.userScrolled(); return; }
     if (RS.tapZones && x > w * 0.78){ this.pageTurn(1); Follow.userScrolled(); return; }
     this.setChrome(this.chromeHidden());
@@ -502,7 +532,7 @@ $("#reader").addEventListener("scroll", () => {
     _scrRAF = 0; const rd = $("#reader"), st = rd.scrollTop;
     // hide the bars when the reader scrolls down on their own (like a book: out of the way)
     if (Reading.userTouching && st > Reading.lastScrollTop + 14 && document.body.classList.contains("reading") && !Reading.chromeHidden()) Reading.setChrome(false);
-    Reading.lastScrollTop = st; Reading.update();
+    Reading.lastScrollTop = st; Reading.update(); if (Annot.selecting && Annot.reposition) Annot.reposition();
   });
 }, { passive:true });
 // manual scrolling (finger / wheel / keys) detaches the page from the voice
@@ -512,6 +542,23 @@ $("#reader").addEventListener("touchend", _touchEnd, { passive:true });
 $("#reader").addEventListener("touchcancel", _touchEnd, { passive:true });
 $("#reader").addEventListener("touchmove", () => { if (!Reading.pinching) Follow.userScrolled(); }, { passive:true });
 $("#reader").addEventListener("wheel", (e) => { if (!e.ctrlKey) Follow.userScrolled(); }, { passive:true });
+
+/* swipe to flip pages */
+let _sw = null;
+$("#reader").addEventListener("touchstart", (e) => {
+  _sw = (e.touches.length === 1 && Reading.flipActive() && !Annot.selecting && !SelDrag.mode && !Ink.active) ? { x:e.touches[0].clientX, y:e.touches[0].clientY, t:Date.now() } : null;
+}, { passive:true });
+$("#reader").addEventListener("touchend", (e) => {
+  const s0 = _sw; _sw = null; if (!s0 || Reading.pinching || SelDrag.mode || _lpFired) return;
+  const t = e.changedTouches[0], dx = t.clientX - s0.x, dy = t.clientY - s0.y, dt = Date.now() - s0.t;
+  if (dt > 800) return;
+  let dir = 0;
+  if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy) * 1.3) dir = dx < 0 ? 1 : -1;
+  else if (Math.abs(dy) > 60 && Math.abs(dy) > Math.abs(dx) * 1.3) dir = dy < 0 ? 1 : -1;
+  if (!dir) return;
+  Reading.stopAuto(true); Reading.pageTurn(dir); Follow.userScrolled();
+  _suppressNextClick = true; clearTimeout(_suppressClickT); _suppressClickT = setTimeout(() => { _suppressNextClick = false; }, 350);
+}, { passive:true });
 
 /* tap routing: replaces the old "tap a word = start speaking" behaviour */
 $("#reader").addEventListener("click", (e) => {
@@ -584,13 +631,14 @@ const Settings = {
     if (!document.documentElement.lang) document.documentElement.lang = "en";
     $("#fontSize") && ($("#fontSize").value = RS.fs);
     try{ if (Native.has) AndroidBridge.setVolumeKeyPaging(!!RS.volKeys); }catch(e){}
+    document.body.classList.toggle("flipping", Reading.flipActive());
     Reading.keepAwake();
   },
   set(key, val){
     RS[key] = val;
     const layout = ["fs","lh","ps","mx","font","align","hyphen"].includes(key);
     if (layout && Reader.words.length) Reading.withAnchor(() => this.applyAll()); else this.applyAll();
-    if (key === "fs" || key === "font") this.syncOpen();
+    if (key === "fs" || key === "font" || key === "flip") this.syncOpen();
     this.save();
   },
   zoomPdf(z, p){
@@ -636,6 +684,8 @@ const Settings = {
       rng("warm", 0, 0.5, 0.05, "Warm light", v => Math.round(v * 200) + "%") +
       tog("keepOn", "Keep screen on while reading") +
       '<div class="setTitle">Turning pages</div>' +
+      '<div class="setRow"><label>Page style</label>' + seg("flip", [["false","Scroll"],["true","Flip pages"]]) + '</div>' +
+      (RS.flip ? '<div class="setRow"><span class="lbl" style="font-size:12px;opacity:.7">Swipe or tap the screen edges to flip. Pinch to zoom still works.</span></div>' : '') +
       tog("tapZones", "Tap the screen edges to turn pages (centre shows/hides bars)") +
       tog("volKeys", "Use volume keys to turn pages") +
       '<div class="setRow"><label>Auto-scroll</label><div class="seg"><button data-auto="1">' + (Reading._auto ? "Stop" : "Start") + '</button></div></div>' +
@@ -664,7 +714,7 @@ $("#settingsBody").addEventListener("change", (e) => {
 $("#settingsBody").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
   if (b.dataset.theme){ Theme.setTheme(b.dataset.theme); Settings.build(); return; }
-  if (b.dataset.k){ const v = b.dataset.k === "align" || b.dataset.k === "font" ? b.dataset.v : b.dataset.v; Settings.set(b.dataset.k, v); return; }
+  if (b.dataset.k){ const dv = b.dataset.v; Settings.set(b.dataset.k, dv === "true" ? true : dv === "false" ? false : dv); return; }
   if (b.dataset.step){ Settings.set("fs", clamp(RS.fs + parseInt(b.dataset.step, 10), 12, 48)); return; }
   if (b.dataset.fit){ Settings.zoomPdf(parseFloat(b.dataset.fit), null); return; }
   if (b.dataset.auto){ if (Reading._auto) Reading.stopAuto(); else { Settings.close(); Reading.startAuto(); } return; }
