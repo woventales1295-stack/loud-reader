@@ -1077,6 +1077,25 @@ const Reader = {
     p.appendChild(frag);
     if (this._mio) this._mio.unobserve(p);
   },
+  // horizontal position of a word measured from the left edge of #content, WITHOUT creating its
+  // <span> (creating spans dirties layout, and in paged mode that re-flows every column of the book)
+  wordLeft(i){
+    const w=this.words[i]; if(!w) return 0;
+    const c=$("#content").getBoundingClientRect().left;
+    if(w._s) return w._s.getBoundingClientRect().left-c;
+    const B=this.blocks[w.b]; if(!B) return 0;
+    if(B.done){ const s=w._s; return s ? s.getBoundingClientRect().left-c : 0; }
+    if(!B.offs){ const o=new Int32Array(B.n); let acc=0; for(let k=0;k<B.n;k++){ o[k]=acc; acc+=this.words[B.first+k].text.length+1; } B.offs=o; }
+    const tn=B.p.firstChild; if(!tn) return 0;
+    const k=i-B.first, off=B.offs[k], len=w.text.length;
+    const r=document.createRange(); try{ r.setStart(tn,off); r.setEnd(tn,Math.min(off+len, tn.length)); }catch(e){ return 0; }
+    const rc=r.getClientRects()[0]||r.getBoundingClientRect();
+    return rc.left-c;
+  },
+  // make sure the paragraph under a screen point has its word spans (needed for press-to-select)
+  matAtPoint(x,y){
+    const h=document.elementFromPoint(x,y); const p=h&&h.closest&&h.closest("#content p"); if(p&&p._B&&!p._B.done) this._mat(p._B);
+  },
   render(blocks, opts){
     this.mode="text";
     this._teardownPdf();
@@ -1086,6 +1105,7 @@ const Reader = {
     this.words=[]; this.sentStart=[]; this.sentEnd=[]; this.starts=[]; this.blocks=[];
     this.pageStartWord={}; this.totalPages=0; this.bodyWordCount=0;
     this._mio = new IntersectionObserver((entries)=>{
+      if (typeof Pager!=="undefined" && Pager.on) return;   // paged mode creates spans on demand only (layout is expensive there)
       for (const e of entries){ if (e.isIntersecting){ const B=e.target._B; if (B) this._mat(B); } }
     }, { root:$("#reader"), rootMargin:"250% 250% 250% 250%" });
     const frag=document.createDocumentFragment();
@@ -2088,6 +2108,7 @@ function suppressNextClick(){
 // strict hit-test: a press must be ON a word (or within a hair of one), never on blank space
 function wordIndexStrict(e){
   if (Reader.mode==="text"){
+    Reader.matAtPoint(e.clientX, e.clientY);
     for (const dx of [0,-5,5]){
       const hit=document.elementFromPoint(e.clientX+dx, e.clientY); const sp=hit&&hit.closest&&hit.closest(".w");
       if (sp) return parseInt(sp.dataset.i,10);

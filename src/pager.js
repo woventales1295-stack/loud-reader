@@ -44,6 +44,8 @@ const Pager = {
     const pos = Reading.pos || 0;
     this.on = false; this.z = 1;
     document.body.classList.remove("paged"); this.label();
+    if (Reader._mio && Reader.mode === "text"){ document.querySelectorAll("#content p").forEach(q => { if (q._B && !q._B.done){ Reader._mio.unobserve(q); Reader._mio.observe(q); } }); }
+    this.unwrapChunks();
     const c = this.c(), st = c.style;
     ["width", "height", "marginLeft", "marginTop", "columnWidth", "columnGap", "transform", "transition", "display", "alignItems"].forEach(k => st[k] = "");
     c.style.removeProperty("--pgW"); c.style.removeProperty("--flipw");
@@ -75,12 +77,45 @@ const Pager = {
       c.style.setProperty("--flipw", this.fitW + "px");
       Object.keys(Reader.pageWrappers).forEach(k => this.fitWrapper(Reader.pageWrappers[k], Number(k)));
     } else {
-      const wc = this.W - 2 * this.mx;
-      st.marginLeft = this.mx + "px"; st.marginTop = this.top + "px";
-      st.width = wc + "px"; st.height = this.H + "px"; st.columnWidth = wc + "px"; st.columnGap = (2 * this.mx) + "px";
+      // The book is laid out as a row of chapter-sized chunks, each its own multi-column box.
+      // One giant multi-column box (hundreds of columns) made every page turn stall for seconds;
+      // chunks keep layout and painting local to what is on screen.
+      this.ensureChunks();
+      const wc = this.W - 2 * this.mx, gap = 2 * this.mx, mx = this.mx;
+      st.marginLeft = "0px"; st.marginTop = this.top + "px"; st.height = this.H + "px"; st.width = "auto";
+      st.display = "flex"; st.flexDirection = "row"; st.columnWidth = ""; st.columnGap = "";
+      this.chunks.forEach(sec => {
+        sec.style.cssText = "flex:none;height:" + this.H + "px;width:" + wc + "px;column-width:" + wc + "px;column-gap:" + gap + "px;column-fill:auto;margin:0 " + mx + "px";
+      });
       void c.offsetWidth;
-      this.count = Math.max(1, Math.round((c.scrollWidth + 2 * this.mx) / this.W));
+      let page = 0;
+      this.chunks.forEach(sec => {
+        const n = Math.max(1, Math.round((sec.scrollWidth + gap) / (wc + gap)));
+        sec.style.width = (n * wc + (n - 1) * gap) + "px"; sec._start = page; sec._pages = n; page += n;
+      });
+      this.count = Math.max(1, page);
     }
+  },
+  // wrap the paragraphs into chunks (once per book): split at chapter headings once a chunk is big enough
+  ensureChunks(){
+    if (this.chunks && this.chunksFor === Reader.words && this.chunks[0] && this.chunks[0].parentNode === this.c()) return;
+    const c = this.c(); this.unwrapChunks();
+    const ps = Array.prototype.slice.call(c.children).filter(n => n.tagName === "P");
+    const chunks = []; let cur = null, wordsIn = 0;
+    ps.forEach(p => {
+      const B = p._B, n = B ? B.n : 40;
+      const heading = p.classList.contains("k-h1") || p.classList.contains("k-h2");
+      if (!cur || (heading && wordsIn >= 1800) || wordsIn >= 6000){ cur = document.createElement("section"); cur.className = "pchunk"; chunks.push(cur); wordsIn = 0; }
+      cur.appendChild(p); wordsIn += n;
+    });
+    if (!chunks.length){ cur = document.createElement("section"); cur.className = "pchunk"; chunks.push(cur); }
+    chunks.forEach(sec => c.appendChild(sec));
+    this.chunks = chunks; this.chunksFor = Reader.words;
+  },
+  unwrapChunks(){
+    const c = this.c(); if (!this.chunks) return;
+    this.chunks.forEach(sec => { if (sec.parentNode === c){ while (sec.firstChild) c.insertBefore(sec.firstChild, sec); c.removeChild(sec); } });
+    this.chunks = null; this.chunksFor = null;
   },
   // every PDF page is sized to fit the screen (both ways), centred in its own slot
   fitWrapper(w, p){
@@ -118,16 +153,14 @@ const Pager = {
   pageOfWord(i){
     const w = Reader.words[i]; if (!w) return 0;
     if (this.mode === "pdf") return clamp((w.page || 1) - 1, 0, this.count - 1);
-    const s = w.span; if (!s) return 0;
-    return clamp(Math.floor((s.offsetLeft + 2) / this.W), 0, this.count - 1);
+    return clamp(Math.floor((Reader.wordLeft(i) + 2) / this.W), 0, this.count - 1);
   },
   firstWord(idx){
     if (this.mode === "pdf") return Reader.wordIndexForPage(idx + 1) || 0;
     const n = Reader.words.length; let lo = 0, hi = n - 1, ans = n - 1;
     while (lo <= hi){
-      const mid = (lo + hi) >> 1, s = Reader.words[mid].span;
-      if (!s){ hi = mid - 1; continue; }
-      if (Math.floor((s.offsetLeft + 2) / this.W) >= idx){ ans = mid; hi = mid - 1; } else lo = mid + 1;
+      const mid = (lo + hi) >> 1;
+      if (Math.floor((Reader.wordLeft(mid) + 2) / this.W) >= idx){ ans = mid; hi = mid - 1; } else lo = mid + 1;
     }
     return ans;
   },

@@ -380,7 +380,8 @@
   body.paged main{min-width:0; max-width:100vw; overflow:hidden}
   body.paged #reader{min-width:0; max-width:100%; contain:layout paint; overflow:hidden !important; padding:0 !important; touch-action:none; scroll-behavior:auto}
   body.paged #content{max-width:none !important; position:relative; transform-origin:0 0; will-change:transform; backface-visibility:hidden}
-  body.paged #content:not(.pdfmode){column-fill:auto; margin-left:0}
+  body.paged #content:not(.pdfmode){display:flex; flex-direction:row}
+  body.paged .pchunk{box-sizing:content-box}
   body.paged #content p{orphans:2; widows:2}
   body.paged #content p.k-h1,body.paged #content p.k-h2,body.paged #content p.k-h3{break-after:avoid}
   body.paged #content.pdfmode{display:flex; flex-direction:row; align-items:center; width:auto}
