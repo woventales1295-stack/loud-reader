@@ -99,6 +99,19 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public boolean onRenderProcessGone(WebView v, android.webkit.RenderProcessGoneDetail detail) {
+                // the web renderer died (usually out of memory): don't take the whole app down, rebuild the screen
+                try { Toast.makeText(MainActivity.this, "Reader restarted (low memory)", Toast.LENGTH_LONG).show(); } catch (Exception e) { }
+                try { if (v != null) v.destroy(); } catch (Exception e) { }
+                webView = null;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() { recreate(); }
+                });
+                return true;
+            }
+
+            @Override
             public boolean shouldOverrideUrlLoading(WebView v, String url) {
                 if (url != null && url.startsWith("file:///android_asset/")) {
                     return false;

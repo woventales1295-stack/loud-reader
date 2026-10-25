@@ -170,16 +170,24 @@ async function saveAndReport(name, mime, blob){
 }
 
 /* ---------- IndexedDB: docs (heavy) + meta (light) ---------- */
+const liteDoc = (d) => ({ id:d.id, name:d.name, size:d.size, type:d.type, addedAt:d.addedAt, ocrText:!!(d.ocrText && d.ocrText.length) });
 const DB = (() => {
   let dbp;
   function open(){
     if (dbp) return dbp;
     dbp = new Promise((res, rej) => {
-      const r = indexedDB.open("loud-reader", 5);
+      const r = indexedDB.open("loud-reader", 6);
       r.onupgradeneeded = () => {
         const db = r.result;
         if (!db.objectStoreNames.contains("docs")) db.createObjectStore("docs", { keyPath:"id" });
         if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath:"id" });
+        if (!db.objectStoreNames.contains("lib")){
+          // light per-book catalog: the shelf lists books from here and never touches the heavy "docs" records
+          const ls = db.createObjectStore("lib", { keyPath:"id" });
+          if (db.objectStoreNames.contains("docs")){
+            r.transaction.objectStore("docs").openCursor().onsuccess = (e) => { const c = e.target.result; if (c){ ls.put(liteDoc(c.value)); c.continue(); } };
+          }
+        }
         if (!db.objectStoreNames.contains("parsed")) db.createObjectStore("parsed", { keyPath:"id" });
         if (!db.objectStoreNames.contains("annotations")){
           const store = db.createObjectStore("annotations", { keyPath:"id" });
@@ -199,8 +207,12 @@ const DB = (() => {
     return new Promise((res, rej) => { const rq = fn(db.transaction(store, mode).objectStore(store)); rq.onsuccess=()=>res(rq.result); rq.onerror=()=>rej(rq.error); });
   };
   return {
-    putDoc:(d)=>run("docs","readwrite",s=>s.put(d)), getDoc:(id)=>run("docs","readonly",s=>s.get(id)),
-    allDocs:()=>run("docs","readonly",s=>s.getAll()), delDoc:(id)=>run("docs","readwrite",s=>s.delete(id)),
+    async putDoc(d){ const db=await open(); return new Promise((res,rej)=>{ const tx=db.transaction(["docs","lib"],"readwrite");
+      tx.objectStore("docs").put(d); tx.objectStore("lib").put(liteDoc(d)); tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); tx.onabort=()=>rej(tx.error||new Error("write aborted")); }); },
+    getDoc:(id)=>run("docs","readonly",s=>s.get(id)),
+    allDocs:()=>run("lib","readonly",s=>s.getAll()),
+    async delDoc(id){ const db=await open(); return new Promise((res,rej)=>{ const tx=db.transaction(["docs","lib"],"readwrite");
+      tx.objectStore("docs").delete(id); tx.objectStore("lib").delete(id); tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); }); },
     getMeta:(id)=>run("meta","readonly",s=>s.get(id)), allMeta:()=>run("meta","readonly",s=>s.getAll()),
     delMeta:(id)=>run("meta","readwrite",s=>s.delete(id)),
     async setMeta(id,patch){ const cur=(await this.getMeta(id))||{id}; Object.assign(cur,patch,{id}); return run("meta","readwrite",s=>s.put(cur)); },
@@ -1041,17 +1053,41 @@ const OCR = {
 };
 
 /* ---------- reader model ---------- */
+class TextWord{
+  constructor(text, skip, bi){ this.text=text; this.skip=skip; this.b=bi; this._s=null; }
+  get span(){ const B=Reader.blocks[this.b]; if(B && !B.done) Reader._mat(B); return this._s; }
+}
 const Reader = {
   words:[], sentStart:[], sentEnd:[], starts:[], pageStartWord:{}, totalPages:0, bodyWordCount:0,
   mode:"text", pdfProxy:null, pageWrappers:{}, pageDisplayScale:{}, pagePtWidth:{}, pagePtHeight:{}, _io:null,
 
+  // Text view. Every word needs to be addressable, but a real <span> per word (150k+ DOM
+  // nodes for a normal novel) made opening a book take many seconds and every tap laggy.
+  // So paragraphs start as ONE text node; a paragraph's per-word <span>s are created the
+  // first time anything asks a word for its .span (the getter below) or when it scrolls
+  // near the screen. Span metrics are identical to plain text, so layout never shifts.
+  _mat(B){
+    if (B.done) return; B.done=true;
+    const p=B.p, words=this.words; p.textContent="";
+    const frag=document.createDocumentFragment();
+    for (let k=0;k<B.n;k++){
+      if (k>0) frag.appendChild(document.createTextNode(" "));
+      const w=words[B.first+k]; const span=el("span","w"); span.textContent=w.text; span.dataset.i=B.first+k; w._s=span; frag.appendChild(span);
+    }
+    p.appendChild(frag);
+    if (this._mio) this._mio.unobserve(p);
+  },
   render(blocks, opts){
     this.mode="text";
     this._teardownPdf();
     opts = opts || {};
+    if (this._mio){ this._mio.disconnect(); this._mio=null; }
     const content=$("#content"); content.innerHTML="";
-    this.words=[]; this.sentStart=[]; this.sentEnd=[]; this.starts=[];
+    this.words=[]; this.sentStart=[]; this.sentEnd=[]; this.starts=[]; this.blocks=[];
     this.pageStartWord={}; this.totalPages=0; this.bodyWordCount=0;
+    this._mio = new IntersectionObserver((entries)=>{
+      for (const e of entries){ if (e.isIntersecting){ const B=e.target._B; if (B) this._mat(B); } }
+    }, { root:$("#reader"), rootMargin:"250% 250% 250% 250%" });
     const frag=document.createDocumentFragment();
     let lastPage=null;
     blocks.forEach(raw=>{
@@ -1064,27 +1100,20 @@ const Reader = {
         if (b.page>this.totalPages) this.totalPages=b.page;
       }
       const p=el("p"); if(role!=="body") p.className="aux"; if(b.kind) p.classList.add("k-"+b.kind);
-      if (hasWords){
-        b.words.forEach((w,idx)=>{
-          if (idx>0) p.appendChild(document.createTextNode(" "));
-          const span=el("span","w"); span.textContent=w.str; span.dataset.i=this.words.length;
-          this.words.push({text:w.str, span, skip: role!=="body"}); p.appendChild(span);
-          if (role==="body") this.bodyWordCount++;
-        });
-      } else {
-        b.text.split(/(\s+)/).forEach(tok=>{
-          if(tok==="") return;
-          if(/^\s+$/.test(tok)){ p.appendChild(document.createTextNode(" ")); return; }
-          const span=el("span","w"); span.textContent=tok; span.dataset.i=this.words.length;
-          this.words.push({text:tok, span, skip: role!=="body"}); p.appendChild(span);
-          if (role==="body") this.bodyWordCount++;
-        });
-      }
-      if(this.words.length) this.words[this.words.length-1].blockEnd=true;
+      const toks = hasWords ? b.words.map(w=>w.str) : b.text.split(/\s+/).filter(Boolean);
+      if (!toks.length) return;
+      const bi=this.blocks.length, B={p, first:this.words.length, n:toks.length, done:false};
+      this.blocks.push(B); p._B=B;
+      const skip = role!=="body";
+      for (let k=0;k<toks.length;k++) this.words.push(new TextWord(toks[k], skip, bi));
+      if (!skip) this.bodyWordCount+=toks.length;
+      p.textContent=toks.join(" ");
+      this.words[this.words.length-1].blockEnd=true;
       frag.appendChild(p);
     });
     if (opts.totalPages && opts.totalPages>this.totalPages) this.totalPages=opts.totalPages;
     content.appendChild(frag); this.buildSentences();
+    content.querySelectorAll("p").forEach(p=>this._mio.observe(p));
   },
 
   // Renders the PDF as real page images (like any other PDF viewer) with a
@@ -1346,11 +1375,16 @@ function highlight(i){
   }
   lastHi=i;
 }
+let _readMark=-1;
 function markReadUpTo(i){
-  if (Reader.mode==="pdf") return;
-  if (!RS.dimRead) return; // no trailing "already read" shading over a real page image
-  for(let k=0;k<=i&&k<Reader.words.length;k++){ const w=Reader.words[k]; if(w.span){ const c=w.span.classList; c.remove("speaking"); c.add("read"); } }
-  for(let k=i+1;k<Reader.words.length;k++){ const w=Reader.words[k]; if(w.span) w.span.classList.remove("read"); }
+  if (Reader.mode==="pdf") return; // no trailing "already read" shading over a real page image
+  if (!RS.dimRead){ _readMark=-1; return; }
+  const W=Reader.words; if(!W.length) return;
+  i=Math.min(i, W.length-1);
+  // only touch words whose paragraph is already on the page; incremental from the previous mark
+  const lo=Math.min(_readMark, i)+1, hi=Math.max(_readMark, i);
+  for(let k=Math.max(0,lo-1);k<=hi&&k<W.length;k++){ const s=W[k]._s; if(!s) continue; if(k<=i){ s.classList.remove("speaking"); s.classList.add("read"); } else s.classList.remove("read"); }
+  _readMark=i;
 }
 let _lastHlBox=null; // {page,left,top} of the previously shown .pdfhl box, for the snap-vs-glide decision below
 function highlightPdf(i, noScroll){
@@ -1599,8 +1633,12 @@ async function importFiles(fileList, opts){
   }
   const target = opts.targetFolderId!==undefined ? opts.targetFolderId : Shelf.cwd;
   let firstId=null;
-  for(const f of files){ const id=uid();
+  let n=0;
+  for(let f of files){ const id=uid(); n++;
+    if(files.length>1 && !opts.quiet) setStatus("Importing "+n+" / "+files.length+"…");
+    if(f._entry){ try{ f=await Native.readImportedFile(f._entry); }catch(e){ continue; } }   // folder import: one file in memory at a time
     await DB.putDoc({id,name:f.name,size:f.size,type:f.type,addedAt:Date.now(),blob:f});
+    f=null; await new Promise(r=>setTimeout(r,0));
     if(target) await DB.setMeta(id,{folderId:target});
     if(!firstId) firstId=id; }
   if(opts.silent) return {added:files.length, skipped:skipped.length, firstId};
@@ -1659,7 +1697,8 @@ async function openDoc(id){
       if(cached && cached.v===PARSE_V && Array.isArray(cached.blocks)){ blocks=cached.blocks; doc._ctx=cached.ctx||{}; }
       else {
         const ctx={}; blocks=await parseDoc(doc,(p)=>{ if(token===parseToken) setStatus(`Reading… ${Math.round(p*100)}%`); },ctx); doc._ctx=ctx;
-        if(blocks.length && !ctx.comic) DB.putParsed({id, v:PARSE_V, blocks, ctx}).catch(()=>{});
+        // structured-cloning a big parse result blocks the UI for a moment: do it later, and skip monster books
+        if(blocks.length && !ctx.comic && blocks.length<60000) setTimeout(()=>{ if(UI.activeId===id) DB.putParsed({id, v:PARSE_V, blocks, ctx}).catch(()=>{}); }, 2500);
       }
     }
     if(token!==parseToken) return;
@@ -2406,8 +2445,8 @@ $("#importFolderBtn").onclick=async()=>{
     let manifest; try{ manifest=await Native.pickFolder(); }catch(e){ manifest=null; }
     if (!manifest){ setStatus("Import cancelled."); return; }
     if (!manifest.length){ await dlgAlert("Empty folder","That folder didn't contain any files."); return; }
-    const files=[];
-    for (const entry of manifest){ try{ files.push(await Native.readImportedFile(entry)); }catch(e){} }
+    // lightweight stand-ins: the real bytes are pulled one file at a time while importing
+    const files=manifest.map(entry=>({ name:entry.name, size:entry.size||0, type:"", _relPath:entry.path||entry.name, _entry:entry }));
     await importFolder(files);
   } else {
     $("#folderInput").click(); // browser fallback: real <input webkitdirectory>

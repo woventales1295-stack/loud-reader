@@ -146,7 +146,7 @@
   #reader{flex:1; overflow:auto; padding:24px clamp(16px,6vw,120px) 150px; scroll-behavior:smooth}
   #content{max-width:820px; margin:0 auto; font-size:var(--fs,20px); line-height:1.9}
   #content p{margin:0 0 1.1em}
-  .w{border-radius:5px; padding:0 1px; cursor:pointer; transition:background .14s ease-out,color .14s ease-out,box-shadow .14s ease-out}
+  .w{border-radius:5px; padding:0; cursor:pointer; transition:background .14s ease-out,color .14s ease-out,box-shadow .14s ease-out}
   .w:hover{background:var(--panel2)}
   .w.read{color:var(--muted)}
   .w.speaking{background:var(--hl); color:var(--hl-text); box-shadow:0 0 0 3px var(--hl)}
@@ -162,7 +162,7 @@
   .welcome h1{color:var(--text);font-size:26px;margin-bottom:8px}
   .welcome .big{display:inline-block;margin-top:18px;padding:16px 26px;font-size:17px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;border-radius:14px;font-weight:600;cursor:pointer;box-shadow:var(--shadow)}
   .welcome ul{text-align:left;display:inline-block;margin-top:22px;line-height:2}
-  footer{position:fixed; left:0; right:0; bottom:0; z-index:15; background:color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter:blur(10px); border-top:1px solid var(--line); padding:10px clamp(12px,4vw,40px) calc(10px + env(safe-area-inset-bottom));}
+  footer{position:fixed; left:0; right:0; bottom:0; z-index:15; background:var(--panel); border-top:1px solid var(--line); padding:10px clamp(12px,4vw,40px) calc(10px + env(safe-area-inset-bottom));}
   .seek{display:flex;align-items:center;gap:12px}
   #seek{flex:1; accent-color:var(--accent); height:6px}
   .seek .time{font-size:12px;color:var(--muted);min-width:52px;text-align:right;font-variant-numeric:tabular-nums}
@@ -276,7 +276,7 @@
   #hdrSub{font-size:11px; color:var(--muted)}
   header .rtool{display:none}
   body.reading header{position:fixed; top:0; left:0; right:0; min-height:var(--hdr-h); gap:4px; padding:6px 8px;
-    background:color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter:blur(10px); transition:transform .22s ease, opacity .22s ease}
+    background:var(--panel); transition:transform .22s ease, opacity .22s ease}
   body.reading header .brand, body.reading header #addBtn{display:none}
   body.reading header .hdrTitle{display:block}
   body.reading header .rtool{display:grid}
@@ -301,7 +301,7 @@
 
   /* floating audio dock (read-aloud is a feature, not the whole app) */
   #listenDock{position:fixed; left:50%; transform:translateX(-50%); bottom:calc(84px + env(safe-area-inset-bottom)); z-index:40; width:min(94vw,520px);
-    background:color-mix(in srgb, var(--panel) 96%, transparent); backdrop-filter:blur(12px); border:1px solid var(--line); border-radius:28px; box-shadow:var(--shadow); padding:6px 8px}
+    background:var(--panel); border:1px solid var(--line); border-radius:28px; box-shadow:var(--shadow); padding:6px 8px}
   #listenDock[hidden]{display:none}
   #listenDock .dockRow{display:flex; align-items:center; gap:6px}
   #listenDock .round{width:40px; height:40px}
@@ -397,4 +397,9 @@
   #content p.k-li{margin-left:1.3em; position:relative; margin-bottom:.4em}
   #content p.k-li::before{content:"\2022"; position:absolute; left:-.9em}
   #content p.k-pre{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.9em; text-align:left; margin-bottom:.2em}
+
+  /* v2.7: snappy touch */
+  button, select, input[type=range], .tab, li, .swatch, .themeSw, #libList li{touch-action:manipulation; -webkit-tap-highlight-color:transparent}
+  #shelf, #settingsSheet, #navSheet, #moreMenu{contain:layout style}
+  #settingsSheet, #navSheet, #listenDock{will-change:transform}
 </style>
