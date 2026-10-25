@@ -158,6 +158,41 @@ const Reading = {
     else if (!opts.noAudio){ Speech.cursor = Reader.sentStart[i]; }
     this.updateProgressUI();
   },
+  // bottom edge of the reading area: above the footer when the bars are showing
+  usableBottom(){
+    const rr = this.rd().getBoundingClientRect(), f = document.querySelector("footer");
+    const fh = (f && !this.chromeHidden() && document.body.classList.contains("reading")) ? f.offsetHeight : 0;
+    return rr.bottom - fh - 4;
+  },
+  // flip mode layout: fit a whole PDF page on screen, and hide any half-visible last line
+  layoutFlip(){
+    const rd = this.rd(), c = $("#content");
+    const on = !!RS.flip && document.body.classList.contains("reading");
+    document.body.classList.toggle("flipfit", on && Reader.mode === "pdf");
+    if (!on){ rd.style.clipPath = ""; c.style.removeProperty("--flipw"); return; }
+    const rr = rd.getBoundingClientRect(), line = this.topLine(), bottom = this.usableBottom();
+    if (Reader.mode === "pdf"){
+      const m = this.measure(), p = m ? m.p : 1;
+      const pw = Reader.pagePtWidth[p] || Reader.pagePtWidth[1] || 612, ph = Reader.pagePtHeight[p] || Reader.pagePtHeight[1] || 792;
+      const availW = rd.clientWidth - 12, availH = bottom - line;
+      const fitW = Math.max(120, Math.min(availW, availH * pw / ph - 2));
+      const cur = parseFloat(c.style.getPropertyValue("--flipw")) || 0;
+      if (Math.abs(cur - fitW) > 1){ this.withAnchor(() => c.style.setProperty("--flipw", fitW + "px")); }
+      const wr = m && Reader.pageWrappers[m.p];
+      if (wr && RS.pdfZoom <= 1.01){
+        const pr = wr.getBoundingClientRect();
+        rd.style.clipPath = "inset(" + Math.max(0, pr.top - rr.top - 1) + "px 0 " + Math.max(0, rr.bottom - pr.bottom - 1) + "px 0)";
+      } else rd.style.clipPath = "";
+      return;
+    }
+    c.style.removeProperty("--flipw");
+    const a = this.measure(); if (!a) return;
+    let lo = a.i, hi = Reader.words.length - 1, ans = -1;
+    while (lo <= hi){ const mid = (lo + hi) >> 1, sp = Reader.words[mid].span; if (!sp){ hi = mid - 1; continue; }
+      if (sp.getBoundingClientRect().bottom > bottom){ ans = mid; hi = mid - 1; } else lo = mid + 1; }
+    if (ans >= 0){ const t = Reader.words[ans].span.getBoundingClientRect().top; rd.style.clipPath = t < bottom ? "inset(0 0 " + Math.max(0, rr.bottom - t + 2) + "px 0)" : ""; }
+    else rd.style.clipPath = "";
+  },
   flipActive(){ return !!RS.flip && !(Reader.mode === "pdf" && RS.pdfZoom > 1.01); },
   // slide the page in from the side after a flip jump
   _flipFx(dir){
@@ -171,23 +206,30 @@ const Reading = {
         const line = this.topLine(), cur = this._firstPageBelow(line), w = Reader.pageWrappers[cur];
         if (w){
           const r = w.getBoundingClientRect(), n = Reader.totalPages || Object.keys(Reader.pageWrappers).length;
-          let target = cur;
-          if (dir > 0) target = (r.top < line - 8) ? cur + 1 : cur + 1;
-          else target = (r.top < line - 8) ? cur : cur - 1;
-          target = clamp(target, 1, n); const tw = Reader.pageWrappers[target];
+          const target = clamp(dir > 0 ? cur + 1 : ((r.top < line - 8) ? cur : cur - 1), 1, n), tw = Reader.pageWrappers[target];
           if (tw){ this.suspend++; rd.scrollTop += tw.getBoundingClientRect().top - (line - 2); setTimeout(()=>{ this.suspend = Math.max(0, this.suspend - 1); this.update(true); }, 40); }
         }
       } else {
-        const line = this.topLine();
-        if (dir > 0){
-          const a = this.measure(); let lo = a ? a.i : 0, hi = Reader.words.length - 1, ans = hi; const limit = line + h * 0.97;
+        const line = this.topLine(), bottom = this.usableBottom(), n = Reader.words.length;
+        const firstWhere = (pred, from) => { let lo = from, hi = n - 1, ans = -1;
           while (lo <= hi){ const mid = (lo + hi) >> 1, sp = Reader.words[mid].span; if (!sp){ hi = mid - 1; continue; }
-            if (sp.getBoundingClientRect().top >= limit - 2){ ans = mid; hi = mid - 1; } else lo = mid + 1; }
-          const sp = Reader.words[ans].span; if (sp) rd.scrollTop += sp.getBoundingClientRect().top - line - 2;
-        } else rd.scrollTop -= h * 0.97;
+            if (pred(sp.getBoundingClientRect())){ ans = mid; hi = mid - 1; } else lo = mid + 1; }
+          return ans; };
+        const a = this.measure(), cur = a ? a.i : 0;
+        if (dir > 0){
+          // the first line that is not fully on screen becomes the top line: nothing is skipped
+          let i = firstWhere(r => r.bottom > bottom, cur);
+          if (i >= 0){ const sp = Reader.words[i].span; let d = sp.getBoundingClientRect().top - line - 2; if (d < 8) d = bottom - line - 4; rd.scrollTop += d; }
+        } else {
+          // go back one screenful, snapping to a line start so the previous page's last line is not cut
+          const want = line - (bottom - line) + 2;
+          let i = firstWhere(r => r.top >= want, 0);
+          if (i >= 0){ const sp = Reader.words[i].span; const d = sp.getBoundingClientRect().top - line - 2; rd.scrollTop += Math.min(d, -8); }
+        }
       }
       if (rd.scrollTop !== before){ this._flipFx(dir); this.update(true); }
       else toast(dir > 0 ? "End of book" : "Start of book", 700);
+      requestAnimationFrame(() => this.layoutFlip());
       return;
     }
     if (Reader.mode === "pdf"){
@@ -446,6 +488,7 @@ const Reading = {
   setChrome(show){
     document.body.classList.toggle("chrome-hidden", !show);
     if (!show){ $("#moreMenu").hidden = true; }
+    setTimeout(() => this.layoutFlip(), 260);
   },
 
   /* --- tap handling: middle toggles bars, edges turn pages --- */
@@ -532,7 +575,7 @@ $("#reader").addEventListener("scroll", () => {
     _scrRAF = 0; const rd = $("#reader"), st = rd.scrollTop;
     // hide the bars when the reader scrolls down on their own (like a book: out of the way)
     if (Reading.userTouching && st > Reading.lastScrollTop + 14 && document.body.classList.contains("reading") && !Reading.chromeHidden()) Reading.setChrome(false);
-    Reading.lastScrollTop = st; Reading.update(); if (Annot.selecting && Annot.reposition) Annot.reposition();
+    Reading.lastScrollTop = st; Reading.update(); if (Annot.selecting && Annot.reposition) Annot.reposition(); if (RS.flip && Reading.flipActive() && Reader.mode === "text" && !Reading._clipT) Reading._clipT = setTimeout(() => { Reading._clipT = 0; Reading.layoutFlip(); }, 60);
   });
 }, { passive:true });
 // manual scrolling (finger / wheel / keys) detaches the page from the voice
@@ -632,7 +675,7 @@ const Settings = {
     $("#fontSize") && ($("#fontSize").value = RS.fs);
     try{ if (Native.has) AndroidBridge.setVolumeKeyPaging(!!RS.volKeys); }catch(e){}
     document.body.classList.toggle("flipping", Reading.flipActive());
-    Reading.keepAwake();
+    Reading.keepAwake(); requestAnimationFrame(() => Reading.layoutFlip());
   },
   set(key, val){
     RS[key] = val;

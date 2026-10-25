@@ -40,15 +40,22 @@ function ensureMobi(){
   }
   return _mobiP;
 }
-(async function boot(){
+/* Heavy libraries are decoded + evaluated only when a file type needs them, so the shelf
+   appears almost immediately. The two common ones are warmed up in the background. */
+const _libP={};
+function _ensure(name, fn){ if(!_libP[name]){ _libP[name]=fn(); _libP[name].catch(()=>{ delete _libP[name]; }); } return _libP[name]; }
+function ensurePdf(){ return _ensure("pdf", async()=>{
+  if(!window.pdfjsLib) await loadJS(b64text("lib-pdf"));
+  pdfjsLib.GlobalWorkerOptions.workerSrc = blobURL(b64text("lib-pdfworker"));
+}); }
+function ensureZip(){ return _ensure("zip", async()=>{ if(!window.JSZip) await loadJS(b64text("lib-jszip")); }); }
+function ensureMammoth(){ return _ensure("mammoth", async()=>{ if(!window.mammoth) await loadJS(b64text("lib-mammoth")); }); }
+function ensureTess(){ return _ensure("tess", async()=>{ if(!window.Tesseract) await loadJS(b64text("tess-main")); }); }
+(function boot(){
   try{
-    await loadJS(b64text("lib-pdf"));
-    await loadJS(b64text("lib-mammoth"));
-    await loadJS(b64text("lib-jszip"));
-    await loadJS(b64text("tess-main"));          // Tesseract main (small); worker/core stay embedded until OCR runs
-    pdfjsLib.GlobalWorkerOptions.workerSrc = blobURL(b64text("lib-pdfworker"));
     document.getElementById("boot").remove();
     appInit();
+    setTimeout(()=>{ ensureZip().then(()=>ensurePdf()).catch(()=>{}); }, 1800);   // warm up while the user browses the shelf
   }catch(e){
     console.error(e);
     document.getElementById("boot").textContent = "Failed to initialize: " + e.message;
@@ -168,11 +175,12 @@ const DB = (() => {
   function open(){
     if (dbp) return dbp;
     dbp = new Promise((res, rej) => {
-      const r = indexedDB.open("loud-reader", 4);
+      const r = indexedDB.open("loud-reader", 5);
       r.onupgradeneeded = () => {
         const db = r.result;
         if (!db.objectStoreNames.contains("docs")) db.createObjectStore("docs", { keyPath:"id" });
         if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath:"id" });
+        if (!db.objectStoreNames.contains("parsed")) db.createObjectStore("parsed", { keyPath:"id" });
         if (!db.objectStoreNames.contains("annotations")){
           const store = db.createObjectStore("annotations", { keyPath:"id" });
           store.createIndex("byDoc", "docId", { unique:false });
@@ -196,6 +204,8 @@ const DB = (() => {
     getMeta:(id)=>run("meta","readonly",s=>s.get(id)), allMeta:()=>run("meta","readonly",s=>s.getAll()),
     delMeta:(id)=>run("meta","readwrite",s=>s.delete(id)),
     async setMeta(id,patch){ const cur=(await this.getMeta(id))||{id}; Object.assign(cur,patch,{id}); return run("meta","readwrite",s=>s.put(cur)); },
+    putParsed:(d)=>run("parsed","readwrite",s=>s.put(d)), getParsed:(id)=>run("parsed","readonly",s=>s.get(id)),
+    delParsed:(id)=>run("parsed","readwrite",s=>s.delete(id)),
     putAnnotation:(a)=>run("annotations","readwrite",s=>s.put(a)),
     delAnnotation:(id)=>run("annotations","readwrite",s=>s.delete(id)),
     async annotationsForDoc(docId){
@@ -284,6 +294,7 @@ const ReadAloud = {
 $("#readAloudBtn").onclick=()=>{ ReadAloud.toggle(); };
 ReadAloud.init(); // load the saved on/off state -- without this it silently resets to "on" every launch
 async function parsePDF(blob, onProgress, ctx){
+  await ensurePdf();
   const pdf = await pdfjsLib.getDocument({ data: await blob.arrayBuffer() }).promise;
   if (ctx) ctx.pages = pdf.numPages;
   const rawLines = []; // one entry per visually-distinct line: {page, y, pageHeight, pageWidth, fontSize, items:[{str,x,y,w,h}]}
@@ -491,8 +502,9 @@ function classifyPdfLines(rawLines){
   });
   return out;
 }
-async function parseDOCX(blob){ const res = await mammoth.convertToHtml({ arrayBuffer: await blob.arrayBuffer() }); return htmlToBlocks(res.value, {docx:true}); }
+async function parseDOCX(blob){ await ensureMammoth(); const res = await mammoth.convertToHtml({ arrayBuffer: await blob.arrayBuffer() }); return htmlToBlocks(res.value, {docx:true}); }
 async function parseEPUB(blob){
+  await ensureZip();
   const zip = await JSZip.loadAsync(blob);
   const opfPath = new DOMParser().parseFromString(await zip.file("META-INF/container.xml").async("string"),"application/xml").querySelector("rootfile").getAttribute("full-path");
   const baseDir = opfPath.includes("/") ? opfPath.slice(0,opfPath.lastIndexOf("/")+1) : "";
@@ -715,7 +727,7 @@ async function loadComicEntries(doc, onProgress){
     }
     entries=names.filter(nm=>byName.has(nm)).map(nm=>({name:nm, getBlob:()=>Promise.resolve(byName.get(nm))}));
   } else {
-    const zip=await JSZip.loadAsync(doc.blob);
+    await ensureZip(); const zip=await JSZip.loadAsync(doc.blob);
     const files=[]; zip.forEach((path,f)=>{ if(!f.dir && IMG_RE.test(path) && !/(^|\/)(__MACOSX|\._)/.test(path)) files.push(f); });
     files.sort((a,b)=>naturalCmp(a.name,b.name));
     entries=files.map(f=>({name:f.name, getBlob:()=>f.async("blob").then(b=>b.type?b:new Blob([b],{type:imgMime(f.name)}))}));
@@ -749,7 +761,7 @@ async function openImageBook(doc, onProgress){
 }
 async function openPageSource(doc){
   if(isComicExt(extOf(doc.name))) return openImageBook(doc);
-  return pdfjsLib.getDocument({ data: await doc.blob.arrayBuffer() }).promise;
+  await ensurePdf(); return pdfjsLib.getDocument({ data: await doc.blob.arrayBuffer() }).promise;
 }
 async function parseComic(doc, onProgress, ctx){
   const entries=await loadComicEntries(doc, onProgress);
@@ -916,7 +928,7 @@ const OCR = {
     try{
       const pdf = await openPageSource(doc); pdfSrcRef=pdf;
       const comic = isComicExt(extOf(doc.name));
-      worker = await Tesseract.createWorker(langOrder||"hin+eng", 1, {
+      await ensureTess(); worker = await Tesseract.createWorker(langOrder||"hin+eng", 1, {
         workerPath: this._buildWorkerURL(), workerBlobURL:false,
         corePath:"core", langPath:"lang", gzip:true,
         logger:(m)=>{ if(m.status==="recognizing text") onProgress && onProgress({ frac:m.progress }); }
@@ -1548,7 +1560,7 @@ const Shelf = {
   async deleteBook(d){
     if(!await dlgConfirm("Remove book?","Remove “"+d.name+"” from your library? Its highlights and notes are deleted too.","Remove")) return;
     if(UI.activeId===d.id) closeCurrentDoc();
-    await Promise.all([DB.delDoc(d.id),DB.delMeta(d.id),DB.delAnnotationsForDoc(d.id),DB.delInkForDoc(d.id)]);
+    await Promise.all([DB.delDoc(d.id),DB.delParsed(d.id).catch(()=>{}),DB.delMeta(d.id),DB.delAnnotationsForDoc(d.id),DB.delInkForDoc(d.id)]);
     if(comicCache.id===d.id){ comicCache.id=null; comicCache.entries=null; }
     this.selected.delete(d.id); this.updateSelectBar();
     await this.render();
@@ -1625,6 +1637,7 @@ async function importFolder(fileList){
 }
 
 let parseToken=0;
+const PARSE_V=1;
 async function openDoc(id){
   const token=++parseToken; Speech.stop();
   const doc=await DB.getDoc(id); if(!doc) return;
@@ -1636,7 +1649,15 @@ async function openDoc(id){
   try{
     let blocks, fromOcr=false;
     if(doc.ocrText&&doc.ocrText.length){ blocks=doc.ocrText; fromOcr=true; }
-    else { const ctx={}; blocks=await parseDoc(doc,(p)=>{ if(token===parseToken) setStatus(`Reading… ${Math.round(p*100)}%`); },ctx); doc._ctx=ctx; }
+    else {
+      // parsed text is cached (PDF text extraction is the slow part), so reopening a book is instant
+      let cached=null; try{ cached=await DB.getParsed(id); }catch(e){}
+      if(cached && cached.v===PARSE_V && Array.isArray(cached.blocks)){ blocks=cached.blocks; doc._ctx=cached.ctx||{}; }
+      else {
+        const ctx={}; blocks=await parseDoc(doc,(p)=>{ if(token===parseToken) setStatus(`Reading… ${Math.round(p*100)}%`); },ctx); doc._ctx=ctx;
+        if(blocks.length && !ctx.comic) DB.putParsed({id, v:PARSE_V, blocks, ctx}).catch(()=>{});
+      }
+    }
     if(token!==parseToken) return;
     if(!blocks.length && !(doc._ctx&&doc._ctx.comic)) blocks=["(No readable text was found in this document.)"];
     finishOpen(doc,blocks,fromOcr);
@@ -1795,6 +1816,7 @@ $("#pageGoBtn").onclick=goToPage;
 
 let _resizeSettleT=0, _lastReaderW=0;
 function handleReaderResize(force){
+  if (typeof Reading!=="undefined" && Reading.layoutFlip) Reading.layoutFlip();
   if (Reader.mode!=="pdf"){ _lastReaderW=$("#reader").clientWidth; return; }
   const rw=$("#reader").clientWidth;
   const widthChanged = force===true || Math.abs(rw-_lastReaderW)>1; _lastReaderW=rw;
