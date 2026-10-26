@@ -515,21 +515,79 @@ function classifyPdfLines(rawLines){
   return out;
 }
 async function parseDOCX(blob){ await ensureMammoth(); const res = await mammoth.convertToHtml({ arrayBuffer: await blob.arrayBuffer() }); return htmlToBlocks(res.value, {docx:true}); }
-async function parseEPUB(blob){
+// resolve an href found inside archive file `fromPath` to a normalized archive path (no #fragment)
+function zipPath(fromPath, href){
+  href=String(href||"").split("#")[0]; if(!href) return "";
+  if(/^[a-z][a-z0-9+.-]*:/i.test(href)) return "";          // http:, data:, ...
+  try{ href=decodeURIComponent(href); }catch(e){}
+  const base = href.startsWith("/") ? "" : fromPath.slice(0, fromPath.lastIndexOf("/")+1);
+  const out=[]; (base+href).split("/").forEach(seg=>{ if(!seg||seg===".") return; if(seg==="..") out.pop(); else out.push(seg); });
+  return out.join("/");
+}
+async function parseEPUB(blob, onProgress, ctx){
   await ensureZip();
   const zip = await JSZip.loadAsync(blob);
-  const opfPath = new DOMParser().parseFromString(await zip.file("META-INF/container.xml").async("string"),"application/xml").querySelector("rootfile").getAttribute("full-path");
-  const baseDir = opfPath.includes("/") ? opfPath.slice(0,opfPath.lastIndexOf("/")+1) : "";
-  const opf = new DOMParser().parseFromString(await zip.file(opfPath).async("string"),"application/xml");
-  const manifest={}; opf.querySelectorAll("manifest > item").forEach(i=>manifest[i.getAttribute("id")]=i.getAttribute("href"));
+  const xml = (t)=>new DOMParser().parseFromString(t,"application/xml");
+  const opfPath = xml(await zip.file("META-INF/container.xml").async("string")).querySelector("rootfile").getAttribute("full-path");
+  const opf = xml(await zip.file(opfPath).async("string"));
+  const items={}; opf.querySelectorAll("manifest > item").forEach(i=>items[i.getAttribute("id")]={ href:i.getAttribute("href"), type:i.getAttribute("media-type")||"", props:i.getAttribute("properties")||"" });
   const spine=[...opf.querySelectorAll("spine > itemref")].map(i=>i.getAttribute("idref"));
-  const blocks=[];
+  const getFile=(path)=>zip.file(path)||zip.file(path.replace(/^\.?\//,""));
+  const blocks=[], fileStart={}, anchors={};
+  let n=0;
   for (const idref of spine){
-    const href=manifest[idref]; if(!href) continue;
-    const path=decodeURIComponent(baseDir+href).replace(/\\/g,"/");
-    const f=zip.file(path)||zip.file(path.replace(/^\.?\//,"")); if(!f) continue;
-    for (const b of htmlToBlocks(await f.async("string"), {epub:true})) blocks.push(b);
+    n++; if(onProgress) onProgress(n/spine.length);
+    const it=items[idref]; if(!it||!it.href) continue;
+    const path=zipPath(opfPath, it.href);
+    const f=getFile(path); if(!f) continue;
+    const base=blocks.length; fileStart[path]=base;
+    const part=htmlToBlocks(await f.async("string"), {
+      epub:true,
+      resolveImg:(src)=>zipPath(path, src),
+      onAnchor:(id,local)=>{ if(!(path+"#"+id in anchors)) anchors[path+"#"+id]=base+local; }
+    });
+    for (const b of part) blocks.push(b);
   }
+  // table of contents: EPUB3 nav document, else the EPUB2 NCX
+  try{
+    const toc=[];
+    const navItem=Object.values(items).find(i=>/\bnav\b/.test(i.props));
+    const ncxItem=(opf.querySelector("spine")&&items[opf.querySelector("spine").getAttribute("toc")]) || Object.values(items).find(i=>/dtbncx/.test(i.type));
+    const resolve=(from,href,title,lvl)=>{
+      const path=zipPath(from, href); const frag=(String(href).split("#")[1]||"");
+      let blk=null; if(frag){ try{ blk=anchors[path+"#"+decodeURIComponent(frag)]; }catch(e){} if(blk==null) blk=anchors[path+"#"+frag]; }
+      if(blk==null) blk=fileStart[path];
+      title=String(title||"").replace(/\s+/g," ").trim();
+      if(blk!=null && title) toc.push({title, blk, lvl:Math.max(1,Math.min(3,lvl))});
+    };
+    if(navItem){
+      const np=zipPath(opfPath, navItem.href); const nf=getFile(np);
+      if(nf){
+        const nd=new DOMParser().parseFromString(await nf.async("string"),"text/html");
+        const nav=[...nd.querySelectorAll("nav")].find(x=>/toc/i.test(x.getAttribute("epub:type")||x.getAttribute("role")||x.id||"")) || nd.querySelector("nav");
+        const walk=(ol,lvl)=>{ if(!ol) return; [...ol.children].forEach(li=>{ if(li.tagName!=="LI") return;
+          const a=li.querySelector(":scope > a, :scope > span > a"); const label=li.querySelector(":scope > a, :scope > span");
+          if(a) resolve(np, a.getAttribute("href")||"", a.textContent, lvl); else if(label){ /* heading without link */ }
+          const sub=li.querySelector(":scope > ol"); if(sub) walk(sub, lvl+1); }); };
+        if(nav) walk(nav.querySelector("ol"), 1);
+      }
+    }
+    if(toc.length<2 && ncxItem){
+      const cp=zipPath(opfPath, ncxItem.href); const cf=getFile(cp);
+      if(cf){
+        toc.length=0;
+        const nd=xml(await cf.async("string"));
+        const walk=(parent,lvl)=>{ [...parent.children].forEach(el2=>{ if(el2.localName!=="navPoint") return;
+          const label=el2.querySelector(":scope > navLabel > text"); const c=el2.querySelector(":scope > content");
+          if(c) resolve(cp, c.getAttribute("src")||"", label?label.textContent:"", lvl);
+          walk(el2, lvl+1); }); };
+        const map=nd.querySelector("navMap"); if(map) walk(map,1);
+      }
+    }
+    toc.sort((x,y)=>x.blk-y.blk);
+    const seen=new Set(); const clean=toc.filter(t=>{ const k=t.blk+"|"+t.title; if(seen.has(k)) return false; seen.add(k); return true; });
+    if(ctx) ctx.toc=clean;
+  }catch(e){ console.warn("toc parse failed", e); }
   return blocks;
 }
 /* role tagging: "body" is read aloud, anything else is shown (dimmed) but skipped.
@@ -581,10 +639,7 @@ function htmlToBlocks(html, opts){
   // its own paragraph. (The old "querySelectorAll(p,li,blockquote,td…)" approach duplicated
   // text whenever blocks nested -- <li><p>, <blockquote><p>, <td><p> -- and silently dropped
   // text that sat directly in a <div> or after a <br>, which is how many converted EPUBs are built.)
-  doc.querySelectorAll("nav,svg,img,audio,video,object,canvas,rt,[hidden]").forEach(n=>{
-    if (n.tagName==="NAV" && !/toc|landmarks|page-list/i.test(n.getAttribute("epub:type")||n.getAttribute("role")||"")) { /* plain <nav> still dropped: it is chrome, not prose */ }
-    n.remove();
-  });
+  doc.querySelectorAll("nav,audio,video,object,canvas,rt,[hidden]").forEach(n=>n.remove());
   const BLOCK=new Set("P H1 H2 H3 H4 H5 H6 LI BLOCKQUOTE TD TH PRE DIV SECTION ARTICLE ASIDE UL OL TABLE TBODY THEAD TFOOT TR DL DT DD FIGURE FIGCAPTION HEADER FOOTER MAIN BODY FORM ADDRESS DETAILS SUMMARY CENTER HGROUP".split(" "));
   const BLOCK_SEL="p,h1,h2,h3,h4,h5,h6,li,blockquote,td,th,pre,div,section,article,aside,ul,ol,table,tr,dl,dt,dd,figure,figcaption,details,center";
   const kindFor=(tag,inherit)=>{
@@ -609,6 +664,17 @@ function htmlToBlocks(html, opts){
       if (c.nodeType===3){ run.push(c.nodeValue); return; }
       if (c.nodeType!==1) return;
       const tag=c.tagName;
+      if (c.id && opts.onAnchor){ if (BLOCK.has(tag)) flush(); opts.onAnchor(c.id, blocks.length); }
+      if (tag==="IMG" || (tag.toLowerCase()==="svg")){
+        let src=""; let alt="";
+        if (tag==="IMG"){ src=c.getAttribute("src")||""; alt=c.getAttribute("alt")||""; const w=parseInt(c.getAttribute("width"),10), h=parseInt(c.getAttribute("height"),10); if ((w&&w<48)||(h&&h<48)) return; }
+        else { const im=c.querySelector("image"); if (im) src=im.getAttribute("xlink:href")||im.getAttribute("href")||""; }
+        if (src){
+          const ref = /^data:image\//i.test(src) ? src : (opts.resolveImg ? opts.resolveImg(src) : "");
+          if (ref){ flush(); blocks.push({ img:ref, alt, role:"body" }); }
+        }
+        return;
+      }
       if (tag==="HR"){ flush(); return; }
       if (tag==="BR"){
         // a <br> mid-sentence (hard-wrapped lines from converted books) is just a space;
@@ -617,7 +683,7 @@ function htmlToBlocks(html, opts){
         if (!cur || cur.length<45 || /[.!?\u2026:;"\u201d\u2019)\]]$/.test(cur) || (c.previousSibling && c.previousSibling.nodeName==="BR")) flush(); else run.push(" ");
         return;
       }
-      if (BLOCK.has(tag) || (c.querySelector && c.querySelector(BLOCK_SEL))){ flush(); walk(c, kindFor(tag, kind)); }
+      if (BLOCK.has(tag) || (c.querySelector && c.querySelector(BLOCK_SEL+",img,svg"))){ flush(); walk(c, kindFor(tag, kind)); }
       else run.push(c.textContent);
     });
     flush();
@@ -785,7 +851,7 @@ async function parseDoc(doc, onProgress, ctx){
   const ext = extOf(doc.name);
   if (ext==="pdf") return parsePDF(doc.blob,onProgress,ctx);
   if (ext==="docx") return parseDOCX(doc.blob);
-  if (ext==="epub") return parseEPUB(doc.blob);
+  if (ext==="epub") return parseEPUB(doc.blob,onProgress,ctx);
   if (["mobi","azw","azw3","prc"].includes(ext)) return parseMOBI(doc.blob);
   if (ext==="fb2") return parseFB2(doc.blob);
   if (["txt","md","markdown"].includes(ext)) return parseTextFile(doc.blob, ext);
@@ -1096,23 +1162,52 @@ const Reader = {
   matAtPoint(x,y){
     const h=document.elementFromPoint(x,y); const p=h&&h.closest&&h.closest("#content p"); if(p&&p._B&&!p._B.done) this._mat(p._B);
   },
+  imgLoader:null,
+  // EPUB pictures live inside the zip: unpack each one only when it comes near the screen
+  setImageSource(doc){
+    if (this._imgUrls){ this._imgUrls.forEach(u=>{ try{ URL.revokeObjectURL(u); }catch(e){} }); }
+    this._imgUrls=[]; this.imgLoader=null;
+    if (extOf(doc.name)!=="epub") return;
+    let zp=null; const cache=new Map();
+    const types={png:"image/png",jpg:"image/jpeg",jpeg:"image/jpeg",gif:"image/gif",webp:"image/webp",svg:"image/svg+xml",bmp:"image/bmp"};
+    this.imgLoader=(path)=>{
+      if (cache.has(path)) return cache.get(path);
+      const pr=(async()=>{
+        await ensureZip(); if(!zp) zp=JSZip.loadAsync(doc.blob); const zip=await zp;
+        const f=zip.file(path)||zip.file(path.replace(/^\//,"")); if(!f) throw new Error("missing image");
+        const buf=await f.async("uint8array");
+        const url=URL.createObjectURL(new Blob([buf],{type:types[path.split(".").pop().toLowerCase()]||"image/jpeg"}));
+        this._imgUrls.push(url); return url;
+      })();
+      cache.set(path,pr); return pr;
+    };
+  },
   render(blocks, opts){
     this.mode="text";
     this._teardownPdf();
     opts = opts || {};
     if (this._mio){ this._mio.disconnect(); this._mio=null; }
     const content=$("#content"); content.innerHTML="";
-    this.words=[]; this.sentStart=[]; this.sentEnd=[]; this.starts=[]; this.blocks=[];
+    this.words=[]; this.sentStart=[]; this.sentEnd=[]; this.starts=[]; this.blocks=[]; this.blockWord=[];
     this.pageStartWord={}; this.totalPages=0; this.bodyWordCount=0;
+    if (this._iio){ this._iio.disconnect(); this._iio=null; }
+    this._iio = new IntersectionObserver((entries)=>{
+      for (const e of entries){ if (e.isIntersecting){ this._iio.unobserve(e.target); this.loadFigure(e.target); } }
+    }, { root:$("#reader"), rootMargin:"300% 300% 300% 300%" });
     this._mio = new IntersectionObserver((entries)=>{
       if (typeof Pager!=="undefined" && Pager.on) return;   // paged mode creates spans on demand only (layout is expensive there)
       for (const e of entries){ if (e.isIntersecting){ const B=e.target._B; if (B) this._mat(B); } }
     }, { root:$("#reader"), rootMargin:"250% 250% 250% 250%" });
-    const frag=document.createDocumentFragment();
+    const frag=document.createDocumentFragment(); this._figs=[];
     let lastPage=null;
-    blocks.forEach(raw=>{
+    blocks.forEach((raw,bi)=>{
+      this.blockWord[bi]=this.words.length;
       const b = (typeof raw==="string") ? {text:raw, role:"body"} : raw;
       const role=b.role||"body";
+      if (b.img){   // picture: shown in place, no words, loaded lazily
+        const fig=el("figure","k-img"); const im=el("img"); im.alt=b.alt||""; im.decoding="async"; fig.appendChild(im); fig._src=b.img;
+        frag.appendChild(fig); this._figs.push(fig); return;
+      }
       const hasWords = Array.isArray(b.words) && b.words.length>0;
       if (!hasWords && !(b.text||"").trim()) return;
       if (b.page!=null){
@@ -1122,10 +1217,10 @@ const Reader = {
       const p=el("p"); if(role!=="body") p.className="aux"; if(b.kind) p.classList.add("k-"+b.kind);
       const toks = hasWords ? b.words.map(w=>w.str) : b.text.split(/\s+/).filter(Boolean);
       if (!toks.length) return;
-      const bi=this.blocks.length, B={p, first:this.words.length, n:toks.length, done:false};
+      const bk=this.blocks.length, B={p, first:this.words.length, n:toks.length, done:false, kind:b.kind||""};
       this.blocks.push(B); p._B=B;
       const skip = role!=="body";
-      for (let k=0;k<toks.length;k++) this.words.push(new TextWord(toks[k], skip, bi));
+      for (let k=0;k<toks.length;k++) this.words.push(new TextWord(toks[k], skip, bk));
       if (!skip) this.bodyWordCount+=toks.length;
       p.textContent=toks.join(" ");
       this.words[this.words.length-1].blockEnd=true;
@@ -1134,6 +1229,16 @@ const Reader = {
     if (opts.totalPages && opts.totalPages>this.totalPages) this.totalPages=opts.totalPages;
     content.appendChild(frag); this.buildSentences();
     content.querySelectorAll("p").forEach(p=>this._mio.observe(p));
+    this._figs.forEach(f=>this._iio.observe(f));
+  },
+  loadFigure(fig){
+    if (fig._loaded) return; fig._loaded=true;
+    const im=fig.firstChild, src=fig._src;
+    const done=()=>fig.classList.add("loaded");
+    im.onload=done; im.onerror=()=>{ fig.classList.add("broken"); };
+    if (/^data:/i.test(src)){ im.src=src; return; }
+    if (!this.imgLoader){ fig.classList.add("broken"); return; }
+    this.imgLoader(src).then(u=>{ im.src=u; }).catch(()=>fig.classList.add("broken"));
   },
 
   // Renders the PDF as real page images (like any other PDF viewer) with a
@@ -1699,7 +1804,7 @@ async function importFolder(fileList){
 }
 
 let parseToken=0;
-const PARSE_V=1;
+const PARSE_V=2;
 async function openDoc(id){
   const token=++parseToken; Speech.stop();
   const doc=await DB.getDoc(id); if(!doc) return;
@@ -1747,6 +1852,8 @@ async function finishOpen(doc, blocks, fromOcr){
     else mode = pref;
   }
 
+  Reader.setImageSource(doc);
+  if (typeof Pager!=="undefined" && Pager.on) Pager.disable(true);   // old book's page layout must not touch the new book (it used to reset the saved position to page 1)
   if (isPdf && mode==="pdf") await Reader.renderPdf(blocks, doc, { totalPages: doc._ctx&&doc._ctx.pages });
   else Reader.render(blocks, { totalPages: doc._ctx&&doc._ctx.pages });
   await Annot.loadForDoc(doc.id);

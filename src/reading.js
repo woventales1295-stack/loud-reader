@@ -254,6 +254,14 @@ const Reading = {
     if (this.chapters) return this.chapters;
     let list = [];
     try{ if (currentDoc && extOf(currentDoc.name) === "pdf") list = await this._pdfOutline(); }catch(e){ list = []; }
+    if (list.length < 2){
+      const toc = currentDoc && currentDoc._ctx && currentDoc._ctx.toc;
+      if (toc && toc.length && Reader.blockWord){
+        list = toc.map(t => ({ title:t.title, i:Reader.blockWord[t.blk], lvl:t.lvl })).filter(t => t.i != null && t.i < Reader.words.length);
+        // an entry that points past the last word of its block (e.g. an image-only page) belongs to the next word
+      }
+    }
+    if (list.length < 2) list = this._headingChapters();
     if (list.length < 2) list = this._guessChapters();
     list.sort((a, b) => a.i - b.i);
     this.chapters = list; return list;
@@ -278,6 +286,17 @@ const Reading = {
       await walk(ol, 1);
     } finally { try{ pdf.destroy(); }catch(e){} }
     return out;
+  },
+  // chapters from real headings (h1-h3) when the book has them but no table of contents
+  _headingChapters(){
+    const bl = Reader.blocks || [], W = Reader.words;
+    for (const lv of ["h1", "h2", "h3"]){
+      const hits = bl.filter(B => B.kind === lv && !W[B.first].skip);
+      if (hits.length >= 2){
+        return hits.map(B => ({ title: W.slice(B.first, B.first + Math.min(B.n, 14)).map(w => w.text).join(" "), i:B.first, lvl:1 }));
+      }
+    }
+    return [];
   },
   _guessChapters(){
     const W = Reader.words, out = [], n = W.length;
@@ -315,14 +334,16 @@ const Reading = {
 
   /* --- restore on open --- */
   restore(meta){
-    const rd = this.rd(); rd.scrollTop = 0; rd.scrollLeft = 0;
+    const willPage = !!RS.flip && Reader.words.length > 0 && !(typeof Ink !== "undefined" && Ink.active);
+    const rd = this.rd(); if (!willPage){ rd.scrollTop = 0; rd.scrollLeft = 0; }
     this.chapters = null; this.chapIdx = -1; this.anchor = null;
     this.readSecs = (meta && meta.readSecs) || 0; this.readWords = (meta && meta.readWords) || 0; this.sessWords = 0;
     this.clearSearch(); this.bookmarks = (meta && meta.bookmarks) || []; this.marksLoadedFor = UI.activeId;
     const p = meta && meta.progress > 0 && meta.progress < Reader.words.length ? meta.progress : 0;
     this.pos = p; this.lastPos = p;
     const go = () => { if (p > 0) this.goToWord(p, { noAudio:true }); else this.update(true); this.updateProgressUI(); };
-    go(); requestAnimationFrame(go); setTimeout(go, 220);   // layout (fonts/canvases) can settle late
+    if (willPage){ this._justRestored = true; }   // the pager lays the book out and goes to this.pos itself
+    else { go(); requestAnimationFrame(go); setTimeout(go, 220); }   // layout (fonts/canvases) can settle late
     this.getChapters().then(()=>this.updateProgressUI()).catch(()=>{});
   },
 

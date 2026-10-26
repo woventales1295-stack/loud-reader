@@ -24,20 +24,21 @@ const Pager = {
   },
   enable(){
     if (this.on) return;
-    try{ Reading.update(true); }catch(e){}
+    if (!Reading._justRestored){ try{ Reading.update(true); }catch(e){} }
+    Reading._justRestored = false;
     const pos = Reading.pos || 0;
     Reading.stopAuto && Reading.stopAuto(true);
     this.on = true; this.mode = Reader.mode; this.wordsRef = Reader.words; this.z = 1;
-    document.body.classList.add("paged");
+    this.layout(pos);
     const rd = this.rd(); rd.scrollTop = 0; rd.scrollLeft = 0;
-    this.layout();
-    this.idx = clamp(this.pageOfWord(pos), 0, this.count - 1);
+    this.idx = pos <= 0 ? 0 : clamp(this.pageOfWord(pos), 0, this.count - 1);   // a fresh book opens on its very first page (a cover picture has no words)
     this.place(false);
     Reading.setChrome(false);
     Reading.pos = this.firstWord(this.idx) || pos;
     Reading.updateProgressUI(); this.label();
-    // late layout (fonts, first canvases): settle once more
-    setTimeout(() => { if (this.on){ this.relayout({ mode:Reader.mode, i:pos, p:this.idx + 1 }); } }, 250);
+    // web fonts can change line breaks after the first layout: re-flow once if they arrive late
+    try{ if (document.fonts && document.fonts.status !== "loaded"){ document.fonts.ready.then(() => { if (this.on) this.relayout({ mode:Reader.mode, i:Reading.pos || 0, p:this.idx + 1 }); }); } }catch(e){}
+    this.afterMove();
   },
   disable(keepPos){
     if (!this.on) return;
@@ -62,11 +63,12 @@ const Pager = {
     if (this.W - 2 * mx > 760) mx = Math.round((this.W - 760) / 2);     // keep line length readable on tablets / landscape
     this.mx = mx;
   },
-  layout(){
+  layout(anchorWord){
     this.metrics();
     const c = this.c(), st = c.style;
     st.transition = "none";
     if (this.mode === "pdf"){
+      document.body.classList.add("paged");
       st.marginLeft = "0px"; st.marginTop = this.top + "px"; st.height = this.H + "px"; st.columnWidth = ""; st.columnGap = "";
       this.count = Math.max(1, Reader.totalPages || Object.keys(Reader.pageWrappers).length);
       st.width = (this.count * this.W) + "px";
@@ -77,45 +79,108 @@ const Pager = {
       c.style.setProperty("--flipw", this.fitW + "px");
       Object.keys(Reader.pageWrappers).forEach(k => this.fitWrapper(Reader.pageWrappers[k], Number(k)));
     } else {
-      // The book is laid out as a row of chapter-sized chunks, each its own multi-column box.
-      // One giant multi-column box (hundreds of columns) made every page turn stall for seconds;
-      // chunks keep layout and painting local to what is on screen.
+      // The book is a row of chapter-sized chunks, each its own multi-column box. Only the chunks
+      // around the page you are on are ever laid out; the rest are "hidden" (zero layout/paint cost)
+      // with an estimated width that is replaced by the exact one before you get there.
       this.ensureChunks();
       const wc = this.W - 2 * this.mx, gap = 2 * this.mx, mx = this.mx;
+      this._wc = wc; this._gap = gap;
       st.marginLeft = "0px"; st.marginTop = this.top + "px"; st.height = this.H + "px"; st.width = "auto";
       st.display = "flex"; st.flexDirection = "row"; st.columnWidth = ""; st.columnGap = "";
-      this.chunks.forEach(sec => {
-        sec.style.cssText = "flex:none;height:" + this.H + "px;width:" + wc + "px;column-width:" + wc + "px;column-gap:" + gap + "px;column-fill:auto;margin:0 " + mx + "px";
+      const base = "flex:none;height:" + this.H + "px;width:" + wc + "px;column-width:" + wc + "px;column-gap:" + gap + "px;column-fill:auto;margin:0 " + mx + "px;content-visibility:hidden;";
+      this.chunks.forEach(ch => { ch.el.style.cssText = base; ch._measured = false; ch._vis = false; ch._pages = 1; });
+      const k0 = (anchorWord > 0) ? this.chunkOfWord(anchorWord) : 0;
+      document.body.classList.add("paged");     // only now: style/layout work is limited to the visible chunk
+      this.measure(k0); this.chunks[k0]._vis = true;
+      const c0 = this.chunks[k0], wpp = Math.max(60, (c0.w1 - c0.w0 + 1) / Math.max(1, c0._pages));
+      this.chunks.forEach((ch, k) => {
+        if (k === k0) return;
+        ch._pages = Math.max(1, Math.ceil((ch.w1 - ch.w0 + 1) / wpp));
+        ch.el.style.width = (ch._pages * wc + (ch._pages - 1) * gap) + "px";
       });
-      void c.offsetWidth;
-      let page = 0;
-      this.chunks.forEach(sec => {
-        const n = Math.max(1, Math.round((sec.scrollWidth + gap) / (wc + gap)));
-        sec.style.width = (n * wc + (n - 1) * gap) + "px"; sec._start = page; sec._pages = n; page += n;
-      });
-      this.count = Math.max(1, page);
+      this.recomputeStarts();
     }
   },
   // wrap the paragraphs into chunks (once per book): split at chapter headings once a chunk is big enough
   ensureChunks(){
-    if (this.chunks && this.chunksFor === Reader.words && this.chunks[0] && this.chunks[0].parentNode === this.c()) return;
+    if (this.chunks && this.chunksFor === Reader.words && this.chunks[0] && this.chunks[0].el.parentNode === this.c()) return;
     const c = this.c(); this.unwrapChunks();
-    const ps = Array.prototype.slice.call(c.children).filter(n => n.tagName === "P");
-    const chunks = []; let cur = null, wordsIn = 0;
-    ps.forEach(p => {
+    const nodes = Array.prototype.slice.call(c.children).filter(n => n.tagName === "P" || n.tagName === "FIGURE");
+    const chunks = []; let cur = null, wordsIn = 0, nextWord = 0;
+    const open = () => { const el = document.createElement("section"); el.className = "pchunk"; cur = { el, w0:nextWord, w1:nextWord - 1 }; chunks.push(cur); wordsIn = 0; };
+    nodes.forEach(p => {
       const B = p._B, n = B ? B.n : 40;
       const heading = p.classList.contains("k-h1") || p.classList.contains("k-h2");
-      if (!cur || (heading && wordsIn >= 1800) || wordsIn >= 6000){ cur = document.createElement("section"); cur.className = "pchunk"; chunks.push(cur); wordsIn = 0; }
-      cur.appendChild(p); wordsIn += n;
+      if (!cur || (heading && wordsIn >= 1800) || wordsIn >= 6000) open();
+      cur.el.appendChild(p); wordsIn += n;
+      if (B){ nextWord = B.first + B.n; cur.w1 = nextWord - 1; B.ch = chunks.length - 1; }
     });
-    if (!chunks.length){ cur = document.createElement("section"); cur.className = "pchunk"; chunks.push(cur); }
-    chunks.forEach(sec => c.appendChild(sec));
+    if (!chunks.length) open();
+    chunks.forEach(ch => c.appendChild(ch.el));
     this.chunks = chunks; this.chunksFor = Reader.words;
   },
   unwrapChunks(){
     const c = this.c(); if (!this.chunks) return;
-    this.chunks.forEach(sec => { if (sec.parentNode === c){ while (sec.firstChild) c.insertBefore(sec.firstChild, sec); c.removeChild(sec); } });
+    this.chunks.forEach(ch => { const sec = ch.el; if (sec.parentNode === c){ while (sec.firstChild) c.insertBefore(sec.firstChild, sec); c.removeChild(sec); } });
     this.chunks = null; this.chunksFor = null;
+  },
+  chunkOfWord(i){
+    const ch = this.chunks; let lo = 0, hi = ch.length - 1, ans = 0;
+    while (lo <= hi){ const mid = (lo + hi) >> 1; if (ch[mid].w0 <= i){ ans = mid; lo = mid + 1; } else hi = mid - 1; }
+    return ans;
+  },
+  chunkAt(idx){
+    const ch = this.chunks; let lo = 0, hi = ch.length - 1, ans = 0;
+    while (lo <= hi){ const mid = (lo + hi) >> 1; if (ch[mid]._start <= idx){ ans = mid; lo = mid + 1; } else hi = mid - 1; }
+    return ans;
+  },
+  recomputeStarts(){ let s = 0; this.chunks.forEach(ch => { ch._start = s; s += ch._pages; }); this.count = Math.max(1, s); },
+  // exact page count of one chunk (needs layout, so it is made visible while measured)
+  measure(k){
+    const ch = this.chunks[k], el = ch.el, wc = this._wc, gap = this._gap;
+    el.style.contentVisibility = "visible"; el.style.width = wc + "px";
+    const n = Math.max(1, Math.round((el.scrollWidth + gap) / (wc + gap)));
+    el.style.width = (n * wc + (n - 1) * gap) + "px";
+    ch._pages = n; ch._measured = true; ch._vis = true;
+  },
+  locate(idx){ const k = this.chunkAt(idx); return { k, local: idx - this.chunks[k]._start }; },
+  relocate(loc){
+    const ch = this.chunks[loc.k];
+    this.idx = clamp(ch._start + Math.min(loc.local, ch._pages - 1), 0, this.count - 1);
+    if (!this._moving){ this.tx = -this.idx * this.W; this.apply(false); }
+  },
+  // make chunk k exact (and laid out). Anything before the page you are on may shift it: keep it still.
+  ensure(k, keepVisible){
+    const ch = this.chunks[k]; if (!ch) return;
+    if (ch._measured){ if (keepVisible && !ch._vis){ ch.el.style.contentVisibility = "visible"; ch._vis = true; } return; }
+    const loc = this.chunks.length && this.idx >= 0 ? this.locate(Math.min(this.idx, this.count - 1)) : null, before = ch._pages;
+    this.measure(k);
+    if (!keepVisible){ ch.el.style.contentVisibility = "hidden"; ch._vis = false; }
+    if (ch._pages !== before){ this.recomputeStarts(); if (loc) this.relocate(loc); }
+  },
+  windowUpdate(){
+    if (!this.on || this.mode !== "text" || !this.chunks) return;
+    const k = this.locate(this.idx).k;
+    this.ensure(k, true);
+    if (k > 0) this.ensure(k - 1, true);
+    const k2 = this.locate(this.idx).k;
+    if (k2 + 1 < this.chunks.length) this.ensure(k2 + 1, true);
+    const kk = this.locate(this.idx).k;
+    this.chunks.forEach((ch, j) => { if (Math.abs(j - kk) > 1 && ch._vis){ ch.el.style.contentVisibility = "hidden"; ch._vis = false; } });
+  },
+  // measure the rest of the book in the background, nearest chunks first, only while you are idle
+  refine(){
+    clearTimeout(this._refT);
+    if (!this.on || this.mode !== "text" || !this.chunks) return;
+    this._refT = setTimeout(() => {
+      if (!this.on || !this.chunks) return;
+      if (this._moving || this._touching){ this.refine(); return; }
+      const kc = this.locate(this.idx).k; let best = -1, bd = 1e9;
+      for (let j = 0; j < this.chunks.length; j++){ if (!this.chunks[j]._measured){ const d = Math.abs(j - kc); if (d < bd){ bd = d; best = j; } } }
+      if (best < 0){ this.label(); return; }
+      this.ensure(best, false); this.label();
+      this.refine();
+    }, 40);
   },
   // every PDF page is sized to fit the screen (both ways), centred in its own slot
   fitWrapper(w, p){
@@ -136,11 +201,12 @@ const Pager = {
   relayout(anchor){
     if (!this.on) return;
     const a = anchor || { mode:Reader.mode, i:Reading.pos || 0, p:this.idx + 1 };
-    this.z = 1; this.layout();
-    this.idx = clamp(Reader.mode === "pdf" ? (a.p || 1) - 1 : this.pageOfWord(a.i || 0), 0, this.count - 1);
+    this.z = 1; this.layout(a.i || 0);
+    this.idx = clamp(Reader.mode === "pdf" ? (a.p || 1) - 1 : ((a.i || 0) <= 0 && this.idx === 0 ? 0 : this.pageOfWord(a.i || 0)), 0, this.count - 1);
     this.place(false);
     Reading.pos = this.firstWord(this.idx); Reading.updateProgressUI(); this.label();
     if (this.mode === "pdf"){ const w = Reader.pageWrappers[this.idx + 1]; if (w && w.dataset.rendered !== "1") renderPageCanvas(w, this.idx + 1); }
+    else this.afterMove();
   },
   onResize(){
     if (!this.on) return;
@@ -153,11 +219,13 @@ const Pager = {
   pageOfWord(i){
     const w = Reader.words[i]; if (!w) return 0;
     if (this.mode === "pdf") return clamp((w.page || 1) - 1, 0, this.count - 1);
+    const k = this.chunkOfWord(i); this.ensure(k, true);
     return clamp(Math.floor((Reader.wordLeft(i) + 2) / this.W), 0, this.count - 1);
   },
   firstWord(idx){
     if (this.mode === "pdf") return Reader.wordIndexForPage(idx + 1) || 0;
-    const n = Reader.words.length; let lo = 0, hi = n - 1, ans = n - 1;
+    const k = this.chunkAt(idx); this.ensure(k, true);
+    const ch = this.chunks[k]; let lo = ch.w0, hi = Math.max(ch.w0, ch.w1), ans = Math.max(ch.w0, ch.w1);
     while (lo <= hi){
       const mid = (lo + hi) >> 1;
       if (Math.floor((Reader.wordLeft(mid) + 2) / this.W) >= idx){ ans = mid; hi = mid - 1; } else lo = mid + 1;
@@ -167,6 +235,7 @@ const Pager = {
 
   /* ---------- moving ---------- */
   apply(animate){
+    if (animate){ this._moving = true; clearTimeout(this._mvT); this._mvT = setTimeout(() => { this._moving = false; }, 420); }
     const c = this.c(); c.style.transition = animate ? "transform .34s cubic-bezier(.22,.8,.24,1)" : "none";
     c.style.transform = "translate3d(" + this.tx + "px," + this.ty + "px,0) scale(" + this.z + ")";
   },
@@ -174,6 +243,11 @@ const Pager = {
     this.z = 1; this.tx = -this.idx * this.W; this.ty = 0; this.apply(animate);
   },
   goto(idx, animate){
+    if (this.wordsRef !== Reader.words) return;   // stale layout (a different book is loading)
+    if (this.mode === "text" && this.chunks){
+      const loc = this.locate(clamp(idx, 0, this.count - 1)); this.ensure(loc.k, true);
+      idx = clamp(this.chunks[loc.k]._start + Math.min(loc.local, this.chunks[loc.k]._pages - 1), 0, this.count - 1);
+    }
     idx = clamp(idx, 0, this.count - 1);
     const changed = idx !== this.idx || this.z !== 1;
     if (Annot.selecting && changed) Annot.cancelSelection();
@@ -188,6 +262,7 @@ const Pager = {
     n.hidden = !this.on; if (this.on) n.textContent = (this.idx + 1) + " / " + this.count;
   },
   afterMove(){
+    if (this.mode === "text"){ clearTimeout(this._wuT); this._wuT = setTimeout(() => { this.windowUpdate(); this.refine(); }, 30); return; }
     // make sure the neighbours are painted before they slide in
     if (this.mode === "pdf"){
       [this.idx, this.idx + 1, this.idx - 1].forEach(k => {
@@ -252,6 +327,7 @@ const Pager = {
   const blockClick = () => { _suppressNextClick = true; clearTimeout(_suppressClickT); _suppressClickT = setTimeout(() => { _suppressNextClick = false; }, 350); };
 
   rd.addEventListener("touchstart", (e) => {
+    Pager._touching = true;
     if (!Pager.on || SelDrag.mode) return;
     // catching a page mid-slide freezes it right where it is
     const c = Pager.c(); if (c.style.transition !== "none"){ const t = curTx(); Pager.tx = t[0]; Pager.ty = t[1]; Pager.apply(false); }
@@ -304,6 +380,7 @@ const Pager = {
   }, { passive:false });
 
   const finish = (e) => {
+    setTimeout(() => { Pager._touching = false; }, 350);
     if (!Pager.on){ g = null; pz = null; return; }
     if (pz){
       if (e.touches && e.touches.length >= 2) return;
