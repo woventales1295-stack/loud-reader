@@ -607,6 +607,7 @@ $("#reader").addEventListener("wheel", (e) => {
 }, { passive:false });
 
 /* ---------------- appearance / text settings ---------------- */
+function syncScrim(){ const sc = $("#sheetScrim"); if (sc) sc.hidden = $("#settingsSheet").hidden && $("#navSheet").hidden; }
 const Settings = {
   async load(){
     let saved = null; try{ const m = await DB.getMeta(Theme.SETTINGS_ID); saved = m && m.rs; }catch(e){}
@@ -621,6 +622,7 @@ const Settings = {
     c.setProperty("--hy", RS.hyphen ? "auto" : "manual"); c.setProperty("--pdfzoom", RS.pdfZoom);
     r.setProperty("--mx", RS.mx + "vw");
     document.documentElement.style.setProperty("--dim", RS.dim); document.documentElement.style.setProperty("--warm", RS.warm);
+    document.documentElement.classList.toggle("hasDim", RS.dim > 0); document.documentElement.classList.toggle("hasWarm", RS.warm > 0);
     if (!document.documentElement.lang) document.documentElement.lang = "en";
     $("#fontSize") && ($("#fontSize").value = RS.fs);
     try{ if (Native.has) AndroidBridge.setVolumeKeyPaging(!!RS.volKeys); }catch(e){}
@@ -654,7 +656,7 @@ const Settings = {
     Reading.withAnchor(() => this.applyAll()); this.save(); this.build();
   },
   open(){ this.build(); $("#settingsSheet").hidden = false; $("#sheetScrim").hidden = false; },
-  close(){ $("#settingsSheet").hidden = true; if ($("#navSheet").hidden) $("#sheetScrim").hidden = true; },
+  close(){ $("#settingsSheet").hidden = true; syncScrim(); },
   syncOpen(){ if (!$("#settingsSheet").hidden) this.build(); },
   build(){
     const b = $("#settingsBody"), sc = b.scrollTop, th = Theme.current;
@@ -724,7 +726,7 @@ const Nav = {
     Settings.close(); this.tab = tab || this.tab || "toc";
     $("#navSheet").hidden = false; $("#sheetScrim").hidden = false; this.render();
   },
-  close(){ $("#navSheet").hidden = true; if ($("#settingsSheet").hidden) $("#sheetScrim").hidden = true; },
+  close(){ $("#navSheet").hidden = true; syncScrim(); },
   async render(){
     document.querySelectorAll("#navSheet .sheetTabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === this.tab));
     const body = $("#navBody"); body.innerHTML = "";
@@ -906,3 +908,6 @@ $("#autoSlower").onclick = () => { RS.autoSpeed = clamp(RS.autoSpeed - 1, 1, 30)
 $("#autoStop").onclick = () => Reading.stopAuto();
 
 
+
+// safety net: never leave the dimming scrim up without a sheet on screen
+document.addEventListener("visibilitychange", syncScrim); window.addEventListener("pageshow", syncScrim); setInterval(syncScrim, 2000);

@@ -323,6 +323,8 @@
   #autoChip{bottom:calc(100px + env(safe-area-inset-bottom))}
   #dimOverlay,#warmOverlay{position:fixed; inset:0; pointer-events:none; z-index:95}
   #dimOverlay{background:#000; opacity:var(--dim,0)}
+  #dimOverlay,#warmOverlay{display:none} html.hasDim #dimOverlay,html.hasWarm #warmOverlay{display:block}
+  #sheetScrim[hidden]{display:none}
   #warmOverlay{background:#ff8a2a; mix-blend-mode:multiply; opacity:var(--warm,0)}
 
   /* bottom sheets: appearance + contents */
