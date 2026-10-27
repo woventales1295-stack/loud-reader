@@ -2009,7 +2009,7 @@ $("#ocrRun").onclick=async()=>{
 
 function updatePageNav(){
   const nav=$("#pageNav"); const tp=Reader.totalPages||0;
-  if (tp>1){
+  if (false){
     nav.hidden=false;
     $("#pageInput").max=tp; $("#pageInput").value=1;
     $("#pageTotal").textContent=tp;
@@ -2025,6 +2025,33 @@ function goToPage(){
   Reading.goToWord(idx,{noAudio:true});
 }
 $("#pageGoBtn").onclick=goToPage;
+async function goToPageDialog(){
+  const n=Reader.words.length; if(UI.activeId==null || !n) return;
+  const pos=Reading.pos||0; let cur, total, approx=false, mode;
+  if(Reader.mode==="pdf" || (!Pager.on && Reader.totalPages>1)){
+    mode="doc"; total=Reader.totalPages||1;
+    cur=(Reader.mode==="pdf"?(Reading.anchor&&Reading.anchor.p):(Reader.words[pos]&&Reader.words[pos].page))||1;
+  } else if(Pager.on){ mode="pager"; cur=Pager.idx+1; total=Pager.count; approx=Pager.chunks&&Pager.chunks.some(c=>!c._measured); }
+  else { mode="est"; total=Math.max(1,Math.round(n/250)); cur=Math.min(total,Math.floor(pos/n*total)+1); approx=true; }
+  const p=dlg({title:"Go to page",msg:"You are on page "+cur+" of "+(approx?"about ":"")+total+". Type a page number, or a percentage such as 40%.",input:{value:"",placeholder:"1 – "+total},ok:"Go"});
+  const inp=$("#dlgInput"); inp.setAttribute("inputmode","text"); 
+  const r=await p; if(!r||!r.ok) return;
+  const txt=String(r.value||"").trim(); if(!txt) return;
+  let idx=null;
+  if(/%$/.test(txt)){ const pc=parseFloat(txt); if(Number.isFinite(pc)) idx=Math.round(clamp(pc,0,100)/100*(n-1)); }
+  else {
+    const k=parseInt(txt,10); if(!Number.isFinite(k)){ toast("Enter a page number"); return; }
+    const pg=clamp(k,1,Math.max(1,total));
+    if(mode==="doc") idx=Reader.wordIndexForPage(pg);
+    else if(mode==="pager"){ const t=clamp(pg-1,0,Pager.count-1); idx=t===0?0:Pager.firstWord(t); }
+    else idx=Math.floor((pg-1)/total*n);
+    if(k>total) toast("Last page is "+total);
+  }
+  if(idx==null){ toast("No content found for that page"); return; }
+  Reading.goToWord(clamp(idx,0,n-1),{noAudio:true});
+}
+$("#gotoPageBtn").onclick=()=>{ closeMoreMenu(); goToPageDialog(); };
+$("#wordHint").onclick=()=>goToPageDialog();
 
 let _resizeSettleT=0, _lastReaderW=0;
 function handleReaderResize(force){

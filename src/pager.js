@@ -14,10 +14,10 @@ const Pager = {
 
   /* ---------- enable / disable ---------- */
   want(){
-    return !!RS.flip && document.body.classList.contains("reading") && Reader.words.length > 0 && !(typeof Ink !== "undefined" && Ink.active);
+    return !!RS.flip && UI.activeId != null && Reader.words.length > 0 && !(typeof Ink !== "undefined" && Ink.active);
   },
   sync(){
-    const want = this.want();
+    const want = this.want(); this.label();
     if (want && this.on && (this.mode !== Reader.mode || this.wordsRef !== Reader.words)){ this.disable(true); this.enable(); return; }
     if (want && !this.on) this.enable();
     else if (!want && this.on) this.disable();
@@ -259,7 +259,7 @@ const Pager = {
   label(){
     let n = document.getElementById("pagerNum");
     if (!n){ n = document.createElement("div"); n.id = "pagerNum"; document.body.appendChild(n); }
-    n.hidden = !this.on; if (this.on) n.textContent = (this.idx + 1) + " / " + this.count;
+    n.hidden = !this.on || Shelf.visible; if (this.on) n.textContent = (this.idx + 1) + " / " + this.count;
   },
   afterMove(){
     if (this.mode === "text"){ clearTimeout(this._wuT); this._wuT = setTimeout(() => { this.windowUpdate(); this.refine(); }, 30); return; }
