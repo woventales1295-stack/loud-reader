@@ -43,13 +43,15 @@
       <button id="newFolderBtn" class="icon-btn"><svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2h-8l-2-2zm6 8h-3v3h-2v-3H8v-2h3V7h2v3h3v2z"/></svg> Folder</button>
     </div>
     <ul id="libList"></ul>
+    <div id="selectBar" hidden>
+      <span id="selectCount">0 selected</span>
+      <span class="grow"></span>
+      <button id="selectAllBtn">All</button>
+      <button id="selectMoveBtn">Move…</button>
+      <button id="selectDelBtn" class="btn-danger">Delete</button>
+      <button id="selectCancelBtn" class="btn-accent">Done</button>
+    </div>
   </section>
-  <div id="selectBar" hidden>
-    <span id="selectCount">0 selected</span>
-    <span class="grow"></span>
-    <button id="selectMoveBtn" class="btn-accent">Move to folder…</button>
-    <button id="selectCancelBtn">Cancel</button>
-  </div>
   <main>
     <div id="docHeader">
       <div id="docTitle">No document open</div>

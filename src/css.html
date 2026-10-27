@@ -244,7 +244,10 @@
   body.reading-fullscreen #shelf{display:none}
 
   /* ---- v2: multi-select + move across folders ---- */
-  #selectBar{display:flex; align-items:center; gap:10px; padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--line); position:relative; z-index:3}
+  #selectBar{display:flex; align-items:center; gap:8px; padding:10px 12px calc(10px + env(safe-area-inset-bottom)); background:var(--panel); border-top:1px solid var(--line); position:sticky; bottom:0; z-index:4; margin-top:auto; box-shadow:0 -6px 18px rgba(0,0,0,.18)}
+  #selectBar button{padding:8px 12px}
+  #selectBar .btn-danger{background:var(--danger,#d33); border-color:var(--danger,#d33); color:#fff}
+  #libList{padding-bottom:12px}
   #selectBar[hidden]{display:none}
   #selectBar .grow{flex:1}
   #selectCount{font-size:13px; color:var(--muted); font-weight:600}

@@ -1581,7 +1581,7 @@ const Shelf = {
     while(cur && !seen.has(cur)){ seen.add(cur); const f=folders.find(x=>x.id===cur); if(!f) break; out.unshift(f); cur=f.parent||null; }
     return out; },
   show(overReader){ this.visible=true; this.overReader=!!overReader&&UI.activeId!=null; $("#shelf").hidden=false; if(typeof Reading!=="undefined") Reading.syncChrome(); return this.render(); },
-  hide(){ this.visible=false; $("#shelf").hidden=true; if(typeof Reading!=="undefined") Reading.syncChrome(); },
+  hide(){ if(this.selectMode) this.exitSelectMode(true); this.visible=false; $("#shelf").hidden=true; if(typeof Reading!=="undefined") Reading.syncChrome(); },
   async up(){
     const {folders}=await this._load(); const f=folders.find(x=>x.id===this.cwd);
     this.cwd=(f&&f.parent)||null; return this.render();
@@ -1618,7 +1618,12 @@ const Shelf = {
       sub.textContent=n+(n===1?" item":" items"); meta.append(nm,sub);
       const more=el("button","more"); more.textContent="⋯"; more.title="Folder options";
       more.onclick=(e)=>{ e.stopPropagation(); this.folderMenu(f); };
-      li.append(ic,meta,more); li.onclick=()=>{ this.cwd=f.id; this.render(); }; list.appendChild(li);
+      if(this.selectMode){
+        const chk=el("div","checkmark"+(this.selected.has(f.id)?" checked":""));
+        li.classList.add("selectableItem"); if(this.selected.has(f.id)) li.classList.add("selected");
+        li.append(chk,ic,meta); li.onclick=()=>{ this.toggleSelect(f.id); this.render(); };
+      } else { li.append(ic,meta,more); li.onclick=()=>{ this.cwd=f.id; this.render(); }; }
+      list.appendChild(li);
     });
     here.forEach(d=>{
       const li=el("li"); if(d.id===UI.activeId) li.classList.add("active"); li.dataset.id=d.id;
@@ -1646,28 +1651,61 @@ const Shelf = {
     if(this.selected.has(id)) this.selected.delete(id); else this.selected.add(id);
     this.updateSelectBar();
   },
-  updateSelectBar(){ $("#selectCount").textContent=this.selected.size+" selected"; },
+  updateSelectBar(){
+    const n=this.selected.size; $("#selectCount").textContent=n+" selected";
+    $("#selectMoveBtn").disabled=!n; $("#selectDelBtn").disabled=!n;
+  },
+  async selectAll(){
+    const {docs,folders,fids,folderOf}=await this._load();
+    const ids=[...docs.filter(d=>folderOf(d)===this.cwd).map(d=>d.id),...folders.filter(f=>((f.parent&&fids.has(f.parent))?f.parent:null)===this.cwd).map(f=>f.id)];
+    if(ids.every(i=>this.selected.has(i))) this.selected.clear(); else ids.forEach(i=>this.selected.add(i));
+    this.updateSelectBar(); this.render();
+  },
   enterSelectMode(){
     this.selectMode=true; this.selected.clear();
     $("#selectBar").hidden=false; $("#selectModeBtn").classList.add("active");
     this.updateSelectBar(); this.render();
   },
-  exitSelectMode(){
+  exitSelectMode(quiet){
     this.selectMode=false; this.selected.clear();
     $("#selectBar").hidden=true; $("#selectModeBtn").classList.remove("active");
-    this.render();
+    if(!quiet) this.render();
+  },
+  _subtree(folders,id){ const out=new Set([id]); let grew=true; while(grew){ grew=false; folders.forEach(f=>{ if(f.parent && out.has(f.parent) && !out.has(f.id)){ out.add(f.id); grew=true; } }); } return out; },
+  async _purgeBook(id){
+    if(UI.activeId===id) closeCurrentDoc();
+    await Promise.all([DB.delDoc(id),DB.delParsed(id).catch(()=>{}),DB.delMeta(id),DB.delAnnotationsForDoc(id),DB.delInkForDoc(id)]);
+    if(comicCache.id===id){ comicCache.id=null; comicCache.entries=null; }
+    this.selected.delete(id);
+  },
+  async deleteSelected(){
+    if(!this.selected.size) return;
+    const {docs,folders}=await this._load();
+    const fSel=folders.filter(f=>this.selected.has(f.id)), bSel=docs.filter(d=>this.selected.has(d.id));
+    const allF=new Set(); fSel.forEach(f=>this._subtree(folders,f.id).forEach(i=>allF.add(i)));
+    const metas=await DB.allMeta(); const inside=new Set(docs.filter(d=>{ const m=metas.find(x=>x.id===d.id); return m&&m.folderId&&allF.has(m.folderId); }).map(d=>d.id));
+    bSel.forEach(d=>inside.add(d.id));
+    const msg=(inside.size)+" book(s)"+(allF.size?" and "+allF.size+" folder(s)":"")+" will be permanently removed, along with their highlights and notes. This can’t be undone.";
+    if(!await dlgConfirm("Delete "+this.selected.size+" selected item(s)?",msg,"Delete")) return;
+    for(const id of inside) await this._purgeBook(id);
+    for(const id of allF) await DB.delMeta(id);
+    this.exitSelectMode();
+    toast("Deleted");
   },
   async moveSelected(){
     if(!this.selected.size) return;
     const {folders}=await this._load();
     const label=(f)=>this.chain(folders,f.id).map(x=>x.name).join(" / ");
+    const banned=new Set(); folders.filter(f=>this.selected.has(f.id)).forEach(f=>this._subtree(folders,f.id).forEach(i=>banned.add(i)));   // a folder can't go inside itself
     const opts=[{label:"📚 Library (top level)",value:"__root"}];
-    folders.slice().sort((a,b)=>naturalCmp(label(a),label(b))).forEach(f=>opts.push({label:"📁 "+label(f),value:f.id}));
+    folders.filter(f=>!banned.has(f.id)).sort((a,b)=>naturalCmp(label(a),label(b))).forEach(f=>opts.push({label:"📁 "+label(f),value:f.id}));
     opts.push({label:"＋ New folder…",value:"__new"});
     let c=await dlgChoose("Move "+this.selected.size+" item(s) to",opts); if(c==null) return;
     if(c==="__new"){ c=await this.newFolder(this.cwd); if(!c) return; }
     const target=c==="__root"?null:c;
-    for(const id of this.selected) await DB.setMeta(id,{folderId:target});
+    for(const id of this.selected){
+      if(folders.some(f=>f.id===id)) await DB.setMeta(id,{parent:target}); else await DB.setMeta(id,{folderId:target});
+    }
     this.exitSelectMode();
   },
   async newFolder(parent){
@@ -1692,7 +1730,7 @@ const Shelf = {
     return cur;
   },
   async folderMenu(f){
-    const c=await dlgChoose(f.name,[{label:"Rename",value:"rename"},{label:"Delete folder (books are kept)",value:"del",danger:true}]);
+    const c=await dlgChoose(f.name,[{label:"Rename",value:"rename"},{label:"Delete folder (keep its books)",value:"del",danger:true},{label:"Delete folder and everything in it",value:"delall",danger:true}]);
     if(c==="rename"){ const n=(await dlgPrompt("Rename folder",f.name)||"").trim(); if(n){ await DB.setMeta(f.id,{name:n}); } }
     else if(c==="del"){
       if(!await dlgConfirm("Delete folder?","“"+f.name+"” will be removed. Its books and sub-folders move up one level.","Delete")) return;
@@ -1700,6 +1738,13 @@ const Shelf = {
       for(const d of docs){ const m=await DB.getMeta(d.id); if(m&&m.folderId===f.id) await DB.setMeta(d.id,{folderId:parent}); }
       for(const x of folders){ if(x.parent===f.id) await DB.setMeta(x.id,{parent}); }
       await DB.delMeta(f.id);
+    }
+    else if(c==="delall"){
+      const {docs,folders}=await this._load(); const sub=this._subtree(folders,f.id); const metas=await DB.allMeta();
+      const ids=docs.filter(d=>{ const m=metas.find(x=>x.id===d.id); return m&&m.folderId&&sub.has(m.folderId); }).map(d=>d.id);
+      if(!await dlgConfirm("Delete folder and contents?","“"+f.name+"”, its "+ids.length+" book(s) and sub-folders will be permanently removed, along with highlights and notes.","Delete")) return;
+      for(const id of ids) await this._purgeBook(id);
+      for(const i of sub) await DB.delMeta(i);
     }
     await this.render();
   },
@@ -1722,10 +1767,7 @@ const Shelf = {
   },
   async deleteBook(d){
     if(!await dlgConfirm("Remove book?","Remove “"+d.name+"” from your library? Its highlights and notes are deleted too.","Remove")) return;
-    if(UI.activeId===d.id) closeCurrentDoc();
-    await Promise.all([DB.delDoc(d.id),DB.delParsed(d.id).catch(()=>{}),DB.delMeta(d.id),DB.delAnnotationsForDoc(d.id),DB.delInkForDoc(d.id)]);
-    if(comicCache.id===d.id){ comicCache.id=null; comicCache.entries=null; }
-    this.selected.delete(d.id); this.updateSelectBar();
+    await this._purgeBook(d.id); this.updateSelectBar();
     await this.render();
   }
 };
@@ -2516,6 +2558,7 @@ $("#saveTextBtn").onclick=async()=>{
 /* ---------- back button (called from MainActivity.onBackPressed) ---------- */
 window.__handleBack=function(){
   if(!$("#dlg").hidden){ dlgClose(null); return true; }
+  if(Shelf.visible && Shelf.selectMode){ Shelf.exitSelectMode(); return true; }
   if(!$("#noteModal").hidden){ $("#noteCancelBtn").click(); return true; }
   if(!$("#annotListModal").hidden){ $("#annotListModal").hidden=true; return true; }
   if(Annot.selecting){ Annot.cancelSelection(); return true; }
@@ -2567,6 +2610,8 @@ $("#fileInput").onchange=(e)=>{ importFiles(e.target.files); e.target.value=""; 
 $("#selectModeBtn").onclick=()=>Shelf.enterSelectMode();
 $("#selectCancelBtn").onclick=()=>Shelf.exitSelectMode();
 $("#selectMoveBtn").onclick=()=>Shelf.moveSelected();
+$("#selectDelBtn").onclick=()=>Shelf.deleteSelected();
+$("#selectAllBtn").onclick=()=>Shelf.selectAll();
 $("#importFolderBtn").onclick=async()=>{
   if (Native.has && typeof AndroidBridge.pickFolder==="function"){
     setStatus("Importing folder…");
