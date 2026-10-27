@@ -14,10 +14,10 @@ const FONT_STACKS = {
   mono:  '"Noto Sans Mono","Droid Sans Mono",Menlo,Consolas,"Courier New",monospace'
 };
 const THEME_LIST = [
-  { id:"light", name:"Light", bg:"#f3f5f9", fg:"#1a2230" },
+  { id:"light", name:"Earth", bg:"#f4ebdc", fg:"#3a281a" },
   { id:"sepia", name:"Sepia", bg:"#f4ecd8", fg:"#433422" },
   { id:"gray",  name:"Paper", bg:"#dcdcdc", fg:"#1d1d1d" },
-  { id:"dark",  name:"Dark",  bg:"#0f1216", fg:"#e7ecf3" },
+  { id:"dark",  name:"Nightshade",  bg:"#15101f", fg:"#ece5f6" },
   { id:"black", name:"Black", bg:"#000000", fg:"#cfd3da" }
 ];
 const RS_DEFAULT = { font:"sans", fs:20, lh:1.8, ps:1.0, mx:6, align:"left", hyphen:false, dim:0, warm:0,
@@ -810,7 +810,6 @@ const Nav = {
   }
 };
 document.querySelectorAll("#navSheet .sheetTabs button").forEach(b => b.onclick = () => { Nav.tab = b.dataset.tab; Nav.render(); });
-$("#searchBtn").onclick = () => Nav.open("search");
 $("#hdrTitleBtn").onclick = () => Nav.open("toc");
 $("#bookmarkBtn").onclick = () => Reading.toggleBookmark();
 $("#searchPrev").onclick = () => Reading.gotoHit(Reading.searchIdx - 1);
@@ -833,7 +832,7 @@ $("#searchClear").onclick = () => Reading.clearSearch();
 
 /* ---------------- audio dock ---------------- */
 function showDock(show){
-  const d = $("#listenDock"); d.hidden = !show;
+  const d = $("#listenDock"); d.hidden = !show; document.body.classList.toggle("dockOn", !!show);
   $("#listenBtn").classList.toggle("on", !!show);
   if (show) updateDockInfo();
 }

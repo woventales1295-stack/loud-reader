@@ -263,12 +263,10 @@ const Theme = {
   apply(theme){
     this.current=theme;
     document.documentElement.setAttribute("data-theme", theme);
-    try{ const mt=document.querySelector('meta[name="theme-color"]'); if(mt) mt.content = ({light:"#ffffff",dark:"#14161a",sepia:"#f4ecd8",gray:"#3a3d42",black:"#000000"})[theme]||"#14161a"; }catch(e){}
+    try{ const mt=document.querySelector('meta[name="theme-color"]'); if(mt) mt.content = ({light:"#fbf5e9",dark:"#1e1730",sepia:"#f4ecd8",gray:"#3a3d42",black:"#000000"})[theme]||"#1e1730"; }catch(e){}
     const btn=$("#themeBtn"); if(!btn) return;
-    btn.innerHTML = theme==="light"
-      ? '<svg viewBox="0 0 24 24"><path d="M12 4V2m0 20v-2M4 12H2m20 0h-2M5.6 5.6 4.2 4.2m15.6 15.6-1.4-1.4M5.6 18.4 4.2 19.8M19.8 4.2l-1.4 1.4M12 7a5 5 0 100 10 5 5 0 000-10z"/></svg> Switch to dark mode'
-      : '<svg viewBox="0 0 24 24"><path d="M20.7 15.3A8.5 8.5 0 119 3.3a7 7 0 0011.7 12z"/></svg> Switch to light mode';
-    btn.title = theme==="light" ? "Switch to dark mode" : "Switch to light mode";
+    btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18c1.1 0 1.8-.9 1.5-1.9-.3-1 .3-2.1 1.4-2.1H17a4 4 0 004-4c0-5-4-10-9-10zM7.5 12a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm3-4a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm4 0a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm3 4a1.5 1.5 0 110-3 1.5 1.5 0 010 3z"/></svg> Theme &amp; text';
+    btn.title = "Theme, fonts and spacing";
   },
   async setTheme(t){ this.apply(t); try{ await DB.setMeta(this.SETTINGS_ID,{theme:t}); }catch(e){} },
   async toggle(){
@@ -1611,38 +1609,39 @@ const Shelf = {
         : '<div class="empty">Your library is empty.<br>Tap “Add files” to import PDF, EPUB, MOBI, DOCX, FB2, TXT, Markdown, HTML or comic (CBZ/CBR) files.</div>';
       return;
     }
+    const hueOf=(str)=>{ let h=0; for(let i=0;i<str.length;i++) h=(h*31+str.charCodeAt(i))>>>0; return [12,24,36,48,92,150,178,205,258,282,322,350][h%12]; };
     subs.forEach(f=>{
-      const li=el("li"); const ic=el("div","ficon folder"); ic.textContent="📁";
-      const meta=el("div","meta"); const nm=el("div","name"); nm.textContent=f.name;
-      const sub=el("div","sub"); const n=docs.filter(d=>folderOf(d)===f.id).length+folders.filter(x=>x.parent===f.id).length;
-      sub.textContent=n+(n===1?" item":" items"); meta.append(nm,sub);
-      const more=el("button","more"); more.textContent="⋯"; more.title="Folder options";
-      more.onclick=(e)=>{ e.stopPropagation(); this.folderMenu(f); };
+      const li=el("li","bk fold"); li.title=f.name; li.style.setProperty("--h",hueOf(f.name));
+      const n=docs.filter(d=>folderOf(d)===f.id).length+folders.filter(x=>x.parent===f.id).length;
+      const cv=el("div","cover"); const sp=el("div","spines"); for(let i=0;i<Math.min(4,Math.max(2,n));i++){ const b=el("b"); b.style.height=(26+((i*13+n*7)%20))+"px"; b.style.background="hsl("+((hueOf(f.name)+i*47)%360)+" 36% "+(38+(i%2)*8)+"%)"; sp.appendChild(b); }
+      const fr=el("div","front"); const nm=el("div","nm"); nm.textContent=f.name; const ct=el("div","ct"); ct.textContent="📁 "+n+(n===1?" item":" items"); fr.append(nm,ct);
+      cv.append(sp,fr); li.appendChild(cv);
       if(this.selectMode){
         const chk=el("div","checkmark"+(this.selected.has(f.id)?" checked":""));
         li.classList.add("selectableItem"); if(this.selected.has(f.id)) li.classList.add("selected");
-        li.append(chk,ic,meta); li.onclick=()=>{ this.toggleSelect(f.id); this.render(); };
-      } else { li.append(ic,meta,more); li.onclick=()=>{ this.cwd=f.id; this.render(); }; }
+        li.appendChild(chk); li.onclick=()=>{ this.toggleSelect(f.id); this.render(); };
+      } else {
+        const more=el("button","more"); more.textContent="⋯"; more.title="Folder options"; more.onclick=(e)=>{ e.stopPropagation(); this.folderMenu(f); };
+        li.appendChild(more); li.onclick=()=>{ this.cwd=f.id; this.render(); };
+      }
       list.appendChild(li);
     });
     here.forEach(d=>{
-      const li=el("li"); if(d.id===UI.activeId) li.classList.add("active"); li.dataset.id=d.id;
-      const ext=extOf(d.name); const ic=el("div","ficon "+ext); ic.textContent=ext.toUpperCase().slice(0,5);
-      const meta=el("div","meta"); const nm=el("div","name"); nm.textContent=d.name;
-      const sub=el("div","sub"); const size=el("span"); size.textContent=fmtSize(d.size); sub.appendChild(size);
-      const pc=pctOf(d); if(pc>0){ const pill=el("span","pill progress"); pill.textContent=pc+"%"; sub.appendChild(pill); }
-      if(d.ocrText){ const pill=el("span","pill"); pill.textContent="OCR"; sub.appendChild(pill); }
-      meta.append(nm,sub);
+      const li=el("li","bk"); if(d.id===UI.activeId) li.classList.add("active"); li.dataset.id=d.id; li.title=d.name;
+      const ext=extOf(d.name); const title=d.name.replace(/\.[^.]+$/,"").replace(/[_]+/g," ");
+      li.style.setProperty("--h",hueOf(title));
+      const cv=el("div","cover"); const t=el("div","ttl"); t.textContent=title; const fm=el("div","fmt"); fm.textContent=ext.toUpperCase().slice(0,5);
+      cv.append(t,fm);
+      const pc=pctOf(d); if(pc>0){ const bar=el("div","pc"); const i=el("i"); i.style.width=pc+"%"; bar.appendChild(i); cv.appendChild(bar); const tx=el("div","pcTxt"); tx.textContent=pc+"%"; cv.appendChild(tx); }
+      li.appendChild(cv);
       if(this.selectMode){
         const chk=el("div","checkmark"+(this.selected.has(d.id)?" checked":""));
-        li.classList.add("selectableItem");
-        if(this.selected.has(d.id)) li.classList.add("selected");
-        li.append(chk,ic,meta);
-        li.onclick=()=>{ this.toggleSelect(d.id); this.render(); };
+        li.classList.add("selectableItem"); if(this.selected.has(d.id)) li.classList.add("selected");
+        li.appendChild(chk); li.onclick=()=>{ this.toggleSelect(d.id); this.render(); };
       } else {
         const more=el("button","more"); more.textContent="⋯"; more.title="Book options";
         more.onclick=(e)=>{ e.stopPropagation(); this.bookMenu(d); };
-        li.append(ic,meta,more); li.onclick=()=>openDoc(d.id);
+        li.appendChild(more); li.onclick=()=>openDoc(d.id);
       }
       list.appendChild(li);
     });
@@ -2051,6 +2050,7 @@ async function goToPageDialog(){
   Reading.goToWord(clamp(idx,0,n-1),{noAudio:true});
 }
 $("#gotoPageBtn").onclick=()=>{ closeMoreMenu(); goToPageDialog(); };
+$("#searchMenuBtn").onclick=()=>{ closeMoreMenu(); Nav.open("search"); };
 $("#wordHint").onclick=()=>goToPageDialog();
 
 let _resizeSettleT=0, _lastReaderW=0;
@@ -2086,6 +2086,8 @@ function openMoreMenu(){
   const r=btn.getBoundingClientRect();
   menu.style.top=(r.bottom+8)+"px";
   menu.style.right=(window.innerWidth-r.right)+"px";
+  const inDoc=UI.activeId!=null && !Shelf.visible && Reader.words.length>0;
+  menu.querySelectorAll("[data-needdoc]").forEach(b=>{ b.hidden=!inDoc; });
   menu.hidden=false;
 }
 function closeMoreMenu(){ $("#moreMenu").hidden=true; }

@@ -6,8 +6,7 @@
   <div class="brand"><span class="dot"></span> Loud Reader</div>
   <button id="hdrTitleBtn" class="hdrTitle" title="Contents" hidden><span id="hdrTitle"></span><span id="hdrSub"></span></button>
   <div class="spacer"></div>
-  <button id="addBtn" class="btn-accent icon-btn" title="Add files to the current folder"><svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg> Add files</button>
-  <button id="searchBtn" class="round rtool" title="Search in book"><svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></button>
+  <button id="addBtn" class="btn-accent icon-btn" title="Add files to the current folder"><svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg><span class="lbl">Add files</span></button>
   <button id="bookmarkBtn" class="round rtool" title="Bookmark this page"><svg viewBox="0 0 24 24"><path id="bookmarkPath" d="M17 3H7a2 2 0 00-2 2v16l7-3 7 3V5a2 2 0 00-2-2zm0 15-5-2.18L7 18V5h10v13z"/></svg></button>
   <button id="typeBtn" class="round rtool" title="Appearance &amp; text"><svg viewBox="0 0 24 24"><path d="M9.93 13.5h4.14L12 7.98 9.93 13.5zM20 2H4a2 2 0 00-2 2v16a2 2 0 002 2h16a2 2 0 002-2V4a2 2 0 00-2-2zm-4.05 16.5-1.14-3H9.17l-1.12 3H5.96l5.11-13h1.86l5.11 13h-2.09z"/></svg></button>
   <button id="listenBtn" class="round rtool" title="Listen (read aloud)"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 00-9 9v7a2 2 0 002 2h3v-8H5v-1a7 7 0 0114 0v1h-3v8h3a2 2 0 002-2v-7a9 9 0 00-9-9z"/></svg></button>
@@ -27,21 +26,24 @@
     <span>of <span id="pageTotal">1</span></span>
     <button id="pageGoBtn">Go</button>
   </div>
-  <button id="gotoPageBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm2 14h-3v3h-2v-3H8v-2h3v-3h2v3h3v2zM13 9V3.5L18.5 9H13z"/></svg> Go to page…</button>
-  <button id="fullscreenBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM4 14h2v4h4v2H4v-6zm16 0h-2v4h-4v2h6v-6z"/></svg> Fullscreen reading</button>
-  <button id="saveTextBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zM12 3v10.2l3.6-3.6L17 11l-5 5-5-5 1.4-1.4L11 13.2V3h1z"/></svg> Save text as .txt</button>
-  <button id="annotListBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M4 4h16v2H4V4zm0 5h16v2H4V9zm0 5h10v2H4v-2zm0 5h10v2H4v-2z"/></svg> Highlights &amp; notes</button>
+  <button id="searchMenuBtn" class="menu-item" data-needdoc><svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg> Search in book</button>
+  <button id="gotoPageBtn" class="menu-item" data-needdoc><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm2 14h-3v3h-2v-3H8v-2h3v-3h2v3h3v2zM13 9V3.5L18.5 9H13z"/></svg> Go to page…</button>
+  <button id="fullscreenBtn" class="menu-item" data-needdoc><svg viewBox="0 0 24 24"><path d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM4 14h2v4h4v2H4v-6zm16 0h-2v4h-4v2h6v-6z"/></svg> Fullscreen reading</button>
+  <button id="saveTextBtn" class="menu-item" data-needdoc><svg viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zM12 3v10.2l3.6-3.6L17 11l-5 5-5-5 1.4-1.4L11 13.2V3h1z"/></svg> Save text as .txt</button>
+  <button id="annotListBtn" class="menu-item" data-needdoc><svg viewBox="0 0 24 24"><path d="M4 4h16v2H4V4zm0 5h16v2H4V9zm0 5h10v2H4v-2zm0 5h10v2H4v-2z"/></svg> Highlights &amp; notes</button>
 </div>
 
 <div class="layout">
   <section id="shelf" hidden>
     <div class="shelfTop">
       <nav id="crumbs"></nav>
+      <div class="tools">
+            <button id="selectModeBtn" class="icon-btn" title="Select multiple to move"><svg viewBox="0 0 24 24"><path d="M3 5h2v2H3V5zm4 0h12v2H7V5zM3 11h2v2H3v-2zm4 0h12v2H7v-2zM3 17h2v2H3v-2zm4 0h12v2H7v-2z"/></svg><span class="lbl">Select</span></button>
+      <button id="importFolderBtn" class="icon-btn" title="Import a folder from your device"><svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2h-8l-2-2z"/></svg><span class="lbl">Import</span></button>
+      <button id="newFolderBtn" class="icon-btn"><svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2h-8l-2-2zm6 8h-3v3h-2v-3H8v-2h3V7h2v3h3v2z"/></svg><span class="lbl">New folder</span></button>
       <span class="grow"></span>
       <select id="sortSel" title="Sort"><option value="recent">Recent</option><option value="name">Name</option><option value="progress">Progress</option></select>
-      <button id="selectModeBtn" class="icon-btn" title="Select multiple to move"><svg viewBox="0 0 24 24"><path d="M3 5h2v2H3V5zm4 0h12v2H7V5zM3 11h2v2H3v-2zm4 0h12v2H7v-2zM3 17h2v2H3v-2zm4 0h12v2H7v-2z"/></svg> Select</button>
-      <button id="importFolderBtn" class="icon-btn" title="Import a folder from your device"><svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2h-8l-2-2z"/></svg> Import folder</button>
-      <button id="newFolderBtn" class="icon-btn"><svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2h-8l-2-2zm6 8h-3v3h-2v-3H8v-2h3V7h2v3h3v2z"/></svg> Folder</button>
+      </div>
     </div>
     <ul id="libList"></ul>
     <div id="selectBar" hidden>
@@ -173,9 +175,11 @@
   </div>
 </div>
 
+<div id="chipStack">
 <div id="followChip" hidden><button id="followBtn">⤓ Back to the voice</button></div>
 <div id="autoChip" hidden><button id="autoSlower">−</button><span id="autoLabel">Auto-scroll</span><button id="autoFaster">+</button><button id="autoStop">Stop</button></div>
 <div id="searchChip" hidden><button id="searchPrev">‹</button><span id="searchCount"></span><button id="searchNext">›</button><button id="searchClear">✕</button></div>
+</div>
 <div id="toast" hidden></div>
 <div id="dimOverlay"></div><div id="warmOverlay"></div>
 
