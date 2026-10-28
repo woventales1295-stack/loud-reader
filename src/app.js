@@ -176,7 +176,7 @@ const DB = (() => {
   function open(){
     if (dbp) return dbp;
     dbp = new Promise((res, rej) => {
-      const r = indexedDB.open("loud-reader", 6);
+      const r = indexedDB.open("loud-reader", 7);
       r.onupgradeneeded = () => {
         const db = r.result;
         if (!db.objectStoreNames.contains("docs")) db.createObjectStore("docs", { keyPath:"id" });
@@ -189,6 +189,7 @@ const DB = (() => {
           }
         }
         if (!db.objectStoreNames.contains("parsed")) db.createObjectStore("parsed", { keyPath:"id" });
+        if (!db.objectStoreNames.contains("covers")) db.createObjectStore("covers", { keyPath:"id" });
         if (!db.objectStoreNames.contains("annotations")){
           const store = db.createObjectStore("annotations", { keyPath:"id" });
           store.createIndex("byDoc", "docId", { unique:false });
@@ -216,6 +217,7 @@ const DB = (() => {
     getMeta:(id)=>run("meta","readonly",s=>s.get(id)), allMeta:()=>run("meta","readonly",s=>s.getAll()),
     delMeta:(id)=>run("meta","readwrite",s=>s.delete(id)),
     async setMeta(id,patch){ const cur=(await this.getMeta(id))||{id}; Object.assign(cur,patch,{id}); return run("meta","readwrite",s=>s.put(cur)); },
+    putCover:(c)=>run("covers","readwrite",s=>s.put(c)), allCovers:()=>run("covers","readonly",s=>s.getAll()), delCover:(id)=>run("covers","readwrite",s=>s.delete(id)),
     putParsed:(d)=>run("parsed","readwrite",s=>s.put(d)), getParsed:(id)=>run("parsed","readonly",s=>s.get(id)),
     delParsed:(id)=>run("parsed","readwrite",s=>s.delete(id)),
     putAnnotation:(a)=>run("annotations","readwrite",s=>s.put(a)),
@@ -1563,6 +1565,119 @@ const UI = {
   refreshLibrary(){ return Shelf.render(); }
 };
 
+/* ---------- book covers: pulled out of the file once, kept as a small JPEG ---------- */
+const COVER_V=1;
+const Covers = {
+  map:new Map(), loaded:false, queue:[], running:false,
+  async load(){ if(this.loaded) return; try{ (await DB.allCovers()).forEach(c=>this.map.set(c.id,c)); }catch(e){} this.loaded=true; },
+  url(id){ const c=this.map.get(id); return (c && c.img) ? c.img : null; },
+  tried(id){ const c=this.map.get(id); return !!(c && c.v>=COVER_V); },
+  // shrink any image blob to a ~240px-wide JPEG data URL
+  async shrink(blob){
+    let bmp; try{ bmp=await createImageBitmap(blob); }catch(e){ return null; }
+    try{
+      if(bmp.width<40 || bmp.height<60) return null;
+      const k=Math.min(1, 240/bmp.width, 360/bmp.height); const w=Math.max(1,Math.round(bmp.width*k)), h=Math.max(1,Math.round(bmp.height*k));
+      const cv=document.createElement("canvas"); cv.width=w; cv.height=h; const g=cv.getContext("2d");
+      g.fillStyle="#fff"; g.fillRect(0,0,w,h); g.drawImage(bmp,0,0,w,h);
+      return cv.toDataURL("image/jpeg",0.82);
+    } finally { try{ bmp.close(); }catch(e){} }
+  },
+  async fromEpub(blob){
+    await ensureZip(); const zip=await JSZip.loadAsync(blob);
+    const rd=async(p)=>{ const f=zip.file(p) || zip.file(decodeURIComponent(p)); return f ? f.async("string") : null; };
+    const cont=await rd("META-INF/container.xml"); if(!cont) return null;
+    const opfPath=(/full-path=["']([^"']+)["']/.exec(cont)||[])[1]; if(!opfPath) return null;
+    const opf=new DOMParser().parseFromString(await rd(opfPath)||"","application/xml");
+    const items=[...opf.getElementsByTagName("item")];
+    const isImg=(it)=>/^image\//.test(it.getAttribute("media-type")||"") || /\.(jpe?g|png|gif|webp)$/i.test(it.getAttribute("href")||"");
+    let it=items.find(x=>/(^|\s)cover-image(\s|$)/.test(x.getAttribute("properties")||"") && isImg(x));
+    if(!it){ const m=[...opf.getElementsByTagName("meta")].find(x=>(x.getAttribute("name")||"")==="cover"); if(m){ const id=m.getAttribute("content"); it=items.find(x=>x.getAttribute("id")===id); if(it && !isImg(it)) it=null; } }
+    if(!it) it=items.find(x=>isImg(x) && /cover/i.test((x.getAttribute("id")||"")+" "+(x.getAttribute("href")||"")));
+    if(!it){   // cover page (xhtml) that wraps the picture
+      const ref=[...opf.getElementsByTagName("reference")].find(x=>(x.getAttribute("type")||"")==="cover");
+      const pg=ref && zipPath(opfPath, ref.getAttribute("href").split("#")[0]);
+      const html=pg && await rd(pg);
+      const im=html && /(?:src|xlink:href)=["']([^"']+\.(?:jpe?g|png|gif|webp))["']/i.exec(html);
+      if(im){ const f=zip.file(zipPath(pg, im[1])); if(f) return f.async("blob"); }
+    }
+    if(!it) it=items.find(isImg);
+    if(!it) return null;
+    const f=zip.file(zipPath(opfPath, it.getAttribute("href"))); return f ? f.async("blob") : null;
+  },
+  async fromPdf(blob){
+    if(blob.size>250*1024*1024) return null;
+    await ensurePdf(); const pdf=await pdfjsLib.getDocument({data:await blob.arrayBuffer()}).promise;
+    try{
+      const page=await pdf.getPage(1); const v0=page.getViewport({scale:1}); const sc=Math.min(2, 300/Math.max(1,v0.width)); const vp=page.getViewport({scale:sc});
+      const cv=document.createElement("canvas"); cv.width=Math.ceil(vp.width); cv.height=Math.ceil(vp.height);
+      await page.render({canvasContext:cv.getContext("2d"), viewport:vp}).promise;
+      return await new Promise(r=>cv.toBlob(r,"image/jpeg",0.85));
+    } finally { try{ pdf.destroy(); }catch(e){} }
+  },
+  async fromComic(blob){
+    const head=new Uint8Array(await blob.slice(0,8).arrayBuffer());
+    if(head[0]===0x52&&head[1]===0x61&&head[2]===0x72&&head[3]===0x21){
+      if(blob.size>150*1024*1024) return null;
+      const U=await ensureUnrar(); const wasm=b64bytes("unrar-wasm");
+      const ex=await U.createExtractorFromData({wasmBinary:wasm.buffer, data:new Uint8Array(await blob.arrayBuffer())});
+      const names=[...ex.getFileList().fileHeaders].filter(h=>!h.flags.directory && IMG_RE.test(h.name) && !/(^|\/)(__MACOSX|\._)/.test(h.name)).map(h=>h.name).sort(naturalCmp);
+      if(!names.length) return null;
+      for(const f of ex.extract({files:[names[0]]}).files){ const b=f.extraction && (f.extraction.data || (f.extraction instanceof Uint8Array ? f.extraction : null)); if(b) return new Blob([b],{type:imgMime(names[0])}); }
+      return null;
+    }
+    await ensureZip(); const zip=await JSZip.loadAsync(blob);
+    const files=[]; zip.forEach((path,f)=>{ if(!f.dir && IMG_RE.test(path) && !/(^|\/)(__MACOSX|\._)/.test(path)) files.push(f); });
+    files.sort((a,b)=>naturalCmp(a.name,b.name)); if(!files.length) return null;
+    const b=await files[0].async("blob"); return b.type?b:new Blob([b],{type:imgMime(files[0].name)});
+  },
+  async fromFb2(blob){
+    const buf=await blob.arrayBuffer(); const head=new TextDecoder("latin1").decode(new Uint8Array(buf,0,Math.min(300,buf.byteLength)));
+    const m=/encoding=["']([\w-]+)["']/i.exec(head);
+    const d=new DOMParser().parseFromString(decodeBytes(buf, m&&m[1]),"application/xml");
+    const im=d.querySelector("coverpage image"); if(!im) return null;
+    const ref=(im.getAttribute("l:href")||im.getAttribute("xlink:href")||im.getAttribute("href")||"").replace(/^#/,"");
+    const bin=[...d.getElementsByTagName("binary")].find(b=>b.getAttribute("id")===ref); if(!bin) return null;
+    const raw=atob((bin.textContent||"").replace(/\s+/g,"")); const u=new Uint8Array(raw.length); for(let i=0;i<raw.length;i++) u[i]=raw.charCodeAt(i);
+    return new Blob([u],{type:bin.getAttribute("content-type")||"image/jpeg"});
+  },
+  async fromMobi(blob){
+    const mod=await ensureMobi();
+    const unzlib=async(u8)=>{ const ds=new DecompressionStream("deflate"); const w=ds.writable.getWriter(); w.write(u8); w.close(); return new Uint8Array(await new Response(ds.readable).arrayBuffer()); };
+    const mobi=new mod.MOBI({unzlib}); const book=await mobi.open(blob);
+    return (book && book.getCover) ? await book.getCover() : null;
+  },
+  async extract(id){
+    const doc=await DB.getDoc(id); if(!doc || !doc.blob) return null;
+    const ext=extOf(doc.name); let b=null;
+    if(ext==="epub") b=await this.fromEpub(doc.blob);
+    else if(ext==="pdf") b=await this.fromPdf(doc.blob);
+    else if(["cbz","cbr","zip","rar"].includes(ext)) b=await this.fromComic(doc.blob);
+    else if(ext==="fb2") b=await this.fromFb2(doc.blob);
+    else if(["mobi","azw","azw3","prc"].includes(ext)) b=await this.fromMobi(doc.blob);
+    return b ? this.shrink(b) : null;
+  },
+  want(d){ return !this.tried(d.id) && ["epub","pdf","cbz","cbr","zip","rar","fb2","mobi","azw","azw3","prc"].includes(extOf(d.name)); },
+  request(docs){
+    docs.forEach(d=>{ if(this.want(d) && !this.queue.some(q=>q.id===d.id)) this.queue.push(d); });
+    this.pump();
+  },
+  async pump(){
+    if(this.running) return; this.running=true;
+    try{
+      while(this.queue.length){
+        if(UI.activeId!=null && !Shelf.visible){ await new Promise(r=>setTimeout(r,1500)); continue; }   // never compete with a book you are reading
+        const d=this.queue.shift(); if(!this.want(d)) continue;
+        let img=null; try{ img=await this.extract(d.id); }catch(e){ img=null; }
+        if(!(await DB.getDoc(d.id).then(x=>!!x).catch(()=>false))) continue;     // deleted meanwhile
+        const rec={id:d.id, img, v:COVER_V}; this.map.set(d.id,rec); try{ await DB.putCover(rec); }catch(e){}
+        if(img) Shelf.applyCover(d.id);
+        await new Promise(r=>setTimeout(r,120));
+      }
+    } finally { this.running=false; }
+  }
+};
+
 /* ---------- shelf: library home screen with folders ---------- */
 const Shelf = {
   cwd:null, visible:false, overReader:false, sort:"recent",
@@ -1596,6 +1711,7 @@ const Shelf = {
     mk("Library",null,chain.length===0);
     chain.forEach((f,i)=>mk(f.name,f.id,i===chain.length-1));
     // data for this level
+    await Covers.load();
     const here=docs.filter(d=>folderOf(d)===this.cwd);
     const subs=folders.filter(f=>((f.parent&&fids.has(f.parent))?f.parent:null)===this.cwd).sort((a,b)=>naturalCmp(a.name||"",b.name||""));
     const pctOf=(d)=>{ const m=metaById[d.id]; return (m&&m.progress>0&&m.wordCount>1)?Math.min(100,Math.round(m.progress/(m.wordCount-1)*100)):0; };
@@ -1632,6 +1748,7 @@ const Shelf = {
       li.style.setProperty("--h",hueOf(title));
       const cv=el("div","cover"); const t=el("div","ttl"); t.textContent=title; const fm=el("div","fmt"); fm.textContent=ext.toUpperCase().slice(0,5);
       cv.append(t,fm);
+      const cu=Covers.url(d.id); if(cu){ cv.classList.add("img"); cv.style.backgroundImage="url("+cu+")"; }
       const pc=pctOf(d); if(pc>0){ const bar=el("div","pc"); const i=el("i"); i.style.width=pc+"%"; bar.appendChild(i); cv.appendChild(bar); const tx=el("div","pcTxt"); tx.textContent=pc+"%"; cv.appendChild(tx); }
       li.appendChild(cv);
       if(this.selectMode){
@@ -1645,6 +1762,11 @@ const Shelf = {
       }
       list.appendChild(li);
     });
+    Covers.request(here);
+  },
+  applyCover(id){
+    const li=document.querySelector('#libList li.bk[data-id="'+id+'"]'); const u=Covers.url(id); if(!li||!u) return;
+    const cv=li.querySelector(".cover"); if(cv){ cv.classList.add("img"); cv.style.backgroundImage="url("+u+")"; }
   },
   toggleSelect(id){
     if(this.selected.has(id)) this.selected.delete(id); else this.selected.add(id);
@@ -1673,8 +1795,9 @@ const Shelf = {
   _subtree(folders,id){ const out=new Set([id]); let grew=true; while(grew){ grew=false; folders.forEach(f=>{ if(f.parent && out.has(f.parent) && !out.has(f.id)){ out.add(f.id); grew=true; } }); } return out; },
   async _purgeBook(id){
     if(UI.activeId===id) closeCurrentDoc();
-    await Promise.all([DB.delDoc(id),DB.delParsed(id).catch(()=>{}),DB.delMeta(id),DB.delAnnotationsForDoc(id),DB.delInkForDoc(id)]);
+    await Promise.all([DB.delDoc(id),DB.delParsed(id).catch(()=>{}),DB.delCover(id).catch(()=>{}),DB.delMeta(id),DB.delAnnotationsForDoc(id),DB.delInkForDoc(id)]);
     if(comicCache.id===id){ comicCache.id=null; comicCache.entries=null; }
+    Covers.map.delete(id);
     this.selected.delete(id);
   },
   async deleteSelected(){
