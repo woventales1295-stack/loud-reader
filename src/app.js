@@ -1650,6 +1650,7 @@ const Covers = {
   async extract(id){
     const doc=await DB.getDoc(id); if(!doc || !doc.blob) return null;
     const ext=extOf(doc.name); let b=null;
+    if(doc.blob.size>90*1024*1024) return null;     // huge files: keep the generated cover rather than stall the phone
     if(ext==="epub") b=await this.fromEpub(doc.blob);
     else if(ext==="pdf") b=await this.fromPdf(doc.blob);
     else if(["cbz","cbr","zip","rar"].includes(ext)) b=await this.fromComic(doc.blob);
@@ -1666,7 +1667,7 @@ const Covers = {
     if(this.running) return; this.running=true;
     try{
       while(this.queue.length){
-        if(UI.activeId!=null && !Shelf.visible){ await new Promise(r=>setTimeout(r,1500)); continue; }   // never compete with a book you are reading
+        if(!Shelf.visible || document.hidden){ await new Promise(r=>setTimeout(r,1500)); continue; }   // only while the shelf is on screen: never compete with reading
         const d=this.queue.shift(); if(!this.want(d)) continue;
         let img=null; try{ img=await this.extract(d.id); }catch(e){ img=null; }
         if(!(await DB.getDoc(d.id).then(x=>!!x).catch(()=>false))) continue;     // deleted meanwhile
@@ -2301,8 +2302,14 @@ const Annot = {
     document.querySelectorAll(".w.sel-preview").forEach(s=>s.classList.remove("sel-preview"));
   },
   _showToolbar(){ $("#annotToolbar").hidden=false; this._positionToolbar(); },
+  // existing highlights/notes that the current selection touches
+  overlapping(){
+    const [a,b]=this.range(); if(b<a) return [];
+    return this.items.filter(x=>x.startWord<=b && x.endWord>=a);
+  },
   _positionToolbar(){
     const bar=$("#annotToolbar"); if(bar.hidden) return;
+    $("#annotRemoveBtn").hidden=!this.overlapping().length;
     let rect=null;
     if (Reader.mode==="pdf" && this._selPreviewEl) rect=this._selPreviewEl.getBoundingClientRect();
     else { const [,b]=this.range(); const w=Reader.words[b]; if(w&&w.span) rect=w.span.getBoundingClientRect(); }
@@ -2511,6 +2518,14 @@ $("#annotToolbar").querySelectorAll(".swatch").forEach(btn=>{
 });
 $("#annotNoteBtn").onclick=()=>{ $("#annotToolbar").hidden=true; Annot.openNoteEditor(null); };
 $("#annotCancelBtn").onclick=()=>Annot.cancelSelection();
+$("#annotRemoveBtn").onclick=async()=>{
+  const hit=Annot.overlapping(); if(!hit.length) return;
+  const withNote=hit.filter(x=>x.note&&x.note.trim()).length;
+  if(withNote && !await dlgConfirm("Remove highlight?",withNote===1?"This highlight has a note attached; the note is removed too.":withNote+" of these highlights have notes; the notes are removed too.","Remove")) return;
+  for(const x of hit){ try{ await DB.delAnnotation(x.id); }catch(e){} }
+  const ids=new Set(hit.map(x=>x.id)); Annot.items=Annot.items.filter(x=>!ids.has(x.id));
+  Annot.cancelSelection(); Annot.renderAll(); toast("Highlight removed");
+};
 $("#noteCancelBtn").onclick=()=>{ $("#noteModal").hidden=true; Annot.cancelSelection(); };
 $("#noteSaveBtn").onclick=()=>Annot.saveNote();
 $("#noteDeleteBtn").onclick=()=>{ const id=$("#noteModal").dataset.editingId; if(id) Annot.deleteAnnotation(id); };
@@ -2785,7 +2800,7 @@ setInterval(()=>{ if(Speech.playing&&speechSynthesis.speaking&&!speechSynthesis.
 /*__READING_JS__*/
 Shelf.show(false);
 
-window.__LoudReader = { Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
+window.__LoudReader = { Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
 } /* end appInit */
 </script>
 </body>

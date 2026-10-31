@@ -92,8 +92,10 @@
   #annotToolbar[hidden]{display:none}
   #annotToolbar .swatch{width:30px; height:30px; border-radius:50%; border:2px solid rgba(0,0,0,.15); padding:0}
   #annotToolbar button:not(.swatch){width:34px; height:34px; border-radius:50%; border:none; background:var(--panel2); color:var(--text); display:grid; place-items:center; padding:0}
-  #annotToolbar svg{width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:0}
-  #annotNoteBtn svg{fill:currentColor}
+  #annotToolbar svg{width:18px; height:18px; fill:currentColor}
+  #annotToolbar button[hidden]{display:none}
+  #annotRemoveBtn{color:var(--danger) !important}
+  #annotToolbar .sep{width:1px; height:22px; background:var(--line); margin:0 2px}
 
   #inkPanel{position:fixed; z-index:70; left:50%; bottom:calc(16px + env(safe-area-inset-bottom)); transform:translateX(-50%);
     display:flex; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--line); border-radius:24px; padding:8px 10px; box-shadow:var(--shadow)}
@@ -336,7 +338,7 @@
   #dimOverlay{background:#000; opacity:var(--dim,0)}
   #dimOverlay,#warmOverlay{display:none} html.hasDim #dimOverlay,html.hasWarm #warmOverlay{display:block}
   #sheetScrim[hidden]{display:none}
-  #warmOverlay{background:#ff8a2a; mix-blend-mode:multiply; opacity:var(--warm,0)}
+  #warmOverlay{background:#ff8f3a; opacity:calc(var(--warm,0) * .75)}   /* plain alpha: a full-screen multiply blend made page turns heavy on phones */
 
   /* bottom sheets: appearance + contents */
   #sheetScrim{position:fixed; inset:0; z-index:78; background:rgba(0,0,0,.35)}
