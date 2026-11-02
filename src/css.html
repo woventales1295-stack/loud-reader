@@ -264,7 +264,7 @@
   .checkmark.checked{border-color:var(--accent); background-color:var(--accent);
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23fff' d='M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z'/%3E%3C/svg%3E")}
   /* =================== v2.2: reading-first layout =================== */
-  :root{ --hdr-h:56px; --ff:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans","Noto Sans Devanagari",Helvetica,Arial,sans-serif; }
+  :root{ --sat:env(safe-area-inset-top,0px); --sal:env(safe-area-inset-left,0px); --sar:env(safe-area-inset-right,0px); --hdr-h:calc(56px + var(--sat));  --ff:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans","Noto Sans Devanagari",Helvetica,Arial,sans-serif; }
   html[data-theme="sepia"] .pdfpage canvas, html[data-theme="gray"] .pdfpage canvas{mix-blend-mode:multiply}
   #reader{scroll-behavior:auto; -webkit-overflow-scrolling:touch; touch-action:pan-x pan-y; overscroll-behavior:contain;
     padding:calc(var(--hdr-h) + 10px) clamp(8px,var(--mx,6vw),160px) 150px}
@@ -492,4 +492,18 @@
   body.reading header .hdrTitle{padding:2px 4px}
   body.reading header #bookmarkBtn.on{color:var(--accent)}
   @media (max-width:350px){ body.reading header #bookmarkBtn{display:none} }
+
+  /* v3.1.2: draw under notches / punch-holes, keep controls clear of them */
+  header{padding-top:calc(10px + var(--sat)); padding-left:calc(14px + var(--sal)); padding-right:calc(14px + var(--sar))}
+  body.reading header{padding-top:calc(6px + var(--sat)); padding-left:calc(8px + var(--sal)); padding-right:calc(8px + var(--sar))}
+  footer{padding-left:calc(clamp(12px,4vw,40px) + var(--sal)); padding-right:calc(clamp(12px,4vw,40px) + var(--sar))}
+  #toast{top:calc(var(--hdr-h) + 12px)}
+  #annotToolbar{flex-wrap:wrap; justify-content:center; gap:6px; width:max-content; max-width:calc(100vw - 16px - var(--sal) - var(--sar)); border-radius:22px}
+  @media (max-width:480px){
+    #annotToolbar{gap:3px; padding:5px}
+    #annotToolbar .swatch{width:26px; height:26px}
+    #annotToolbar button:not(.swatch){width:31px; height:31px}
+    #annotToolbar svg{width:17px; height:17px}
+  }
+  @media (max-width:340px){ #annotToolbar .swatch{width:24px; height:24px} #annotToolbar button:not(.swatch){width:28px; height:28px} }
 </style>

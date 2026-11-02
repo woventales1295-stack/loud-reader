@@ -7,6 +7,7 @@ import android.content.ContentValues;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.DocumentsContract;
 import android.speech.tts.TextToSpeech;
@@ -64,6 +65,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     // entry start-to-finish (sequential, increasing offsets) before moving to
     // the next, same access pattern as FileBridge's chunked save in reverse,
     // so one open stream is enough -- no need for true random-access seeking.
+    private String lastInsetJs;
     private String curImportId;
     private InputStream curImportStream;
     private long curImportPos;
@@ -77,12 +79,37 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             WindowManager.LayoutParams.FLAG_FULLSCREEN
         );
 
+        // draw into the notch / teardrop / punch-hole area instead of leaving a black band
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(lp);
+        }
         WebView.setWebContentsDebuggingEnabled(false);
 
         webView = new WebView(this);
         webView.setSystemUiVisibility(
             View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
         );
+
+        webView.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public android.view.WindowInsets onApplyWindowInsets(View v, android.view.WindowInsets insets) {
+                try {
+                    float d = getResources().getDisplayMetrics().density;
+                    int t = 0, l = 0, r = 0;
+                    if (Build.VERSION.SDK_INT >= 28 && insets.getDisplayCutout() != null) {
+                        t = insets.getDisplayCutout().getSafeInsetTop();
+                        l = insets.getDisplayCutout().getSafeInsetLeft();
+                        r = insets.getDisplayCutout().getSafeInsetRight();
+                    }
+                    final String js = "(function(){var s=document.documentElement.style;s.setProperty('--sat','" + Math.round(t / d) + "px');s.setProperty('--sal','" + Math.round(l / d) + "px');s.setProperty('--sar','" + Math.round(r / d) + "px');})()";
+                    webView.post(new Runnable() { public void run() { webView.evaluateJavascript(js, null); } });
+                    lastInsetJs = js;
+                } catch (Throwable ignored) { }
+                return v.onApplyWindowInsets(insets);
+            }
+        });
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -98,6 +125,10 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         s.setUseWideViewPort(true);
 
         webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView v, String url) {
+                if (lastInsetJs != null) v.evaluateJavascript(lastInsetJs, null);
+            }
             @Override
             public boolean onRenderProcessGone(WebView v, android.webkit.RenderProcessGoneDetail detail) {
                 // the web renderer died (usually out of memory): don't take the whole app down, rebuild the screen

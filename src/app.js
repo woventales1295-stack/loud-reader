@@ -2314,10 +2314,14 @@ const Annot = {
     if (Reader.mode==="pdf" && this._selPreviewEl) rect=this._selPreviewEl.getBoundingClientRect();
     else { const [,b]=this.range(); const w=Reader.words[b]; if(w&&w.span) rect=w.span.getBoundingClientRect(); }
     if (!rect) return;
-    const barW=bar.offsetWidth||220;
+    const barW=bar.offsetWidth||220, barH=bar.offsetHeight||48;
+    const cs=getComputedStyle(document.documentElement), sat=parseFloat(cs.getPropertyValue("--sat"))||0;
+    const topMin=Math.max(8, sat+8) + (document.body.classList.contains("reading") && !document.body.classList.contains("chrome-hidden") ? 56 : 0);
     let left=rect.left+rect.width/2-barW/2;
     left=Math.max(8,Math.min(left, window.innerWidth-barW-8));
-    let top=rect.top-56; if (top<8) top=rect.bottom+10;
+    let top=rect.top-barH-10;
+    if (top<topMin){ top=rect.bottom+34; }                                   // no room above: go below the selection handles
+    top=Math.max(topMin, Math.min(top, window.innerHeight-barH-70));       // always fully on screen
     bar.style.left=left+"px"; bar.style.top=top+"px";
   },
 
