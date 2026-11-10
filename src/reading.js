@@ -14,6 +14,7 @@ const FONT_STACKS = {
   mono:  '"Noto Sans Mono","Droid Sans Mono",Menlo,Consolas,"Courier New",monospace'
 };
 const THEME_LIST = [
+  { id:"white", name:"White", bg:"#ffffff", fg:"#111111" },
   { id:"light", name:"Earth", bg:"#f4ebdc", fg:"#3a281a" },
   { id:"sepia", name:"Sepia", bg:"#f4ecd8", fg:"#433422" },
   { id:"gray",  name:"Paper", bg:"#dcdcdc", fg:"#1d1d1d" },
@@ -21,7 +22,7 @@ const THEME_LIST = [
   { id:"black", name:"Black", bg:"#000000", fg:"#cfd3da" }
 ];
 const RS_DEFAULT = { font:"sans", fs:20, lh:1.8, ps:1.0, mx:6, align:"left", hyphen:false, dim:0, warm:0,
-  tapZones:true, volKeys:false, keepOn:true, tapWordRead:false, dimRead:false, pdfZoom:1, autoSpeed:6, flip:false };
+  tapZones:true, volKeys:false, keepOn:true, tapWordRead:false, dimRead:false, pdfZoom:1, autoSpeed:6, flip:false, lfs:13 };
 const RS = Object.assign({}, RS_DEFAULT);
 const HDR_H = 56;
 
@@ -621,6 +622,7 @@ const Settings = {
     c.setProperty("--ff", FONT_STACKS[RS.font] || FONT_STACKS.sans); c.setProperty("--ta", RS.align);
     c.setProperty("--hy", RS.hyphen ? "auto" : "manual"); c.setProperty("--pdfzoom", RS.pdfZoom);
     r.setProperty("--mx", RS.mx + "vw");
+    document.documentElement.style.setProperty("--fold-fs", (RS.lfs || 13) + "px");
     document.documentElement.style.setProperty("--dim", RS.dim); document.documentElement.style.setProperty("--warm", RS.warm);
     document.documentElement.classList.toggle("hasDim", RS.dim > 0); document.documentElement.classList.toggle("hasWarm", RS.warm > 0);
     if (!document.documentElement.lang) document.documentElement.lang = "en";
@@ -669,6 +671,7 @@ const Settings = {
       '<div class="setRow"><label>Size</label><button class="stepBtn" data-step="-1">A−</button><input type="range" data-r="fs" min="12" max="48" step="1" value="' + RS.fs + '"><button class="stepBtn" data-step="1">A+</button><span class="val">' + RS.fs + '</span></div>' +
       '<div class="setRow"><label>Font</label>' + seg("font", [["sans","Sans"],["serif","Serif"],["book","Book"],["mono","Mono"]]) + '</div>' +
       rng("lh", 1.2, 2.6, 0.1, "Line spacing", v => (+v).toFixed(1)) +
+      rng("lfs", 10, 22, 1, "Folder name size", v => v + "px") +
       rng("ps", 0, 2.4, 0.1, "Paragraphs", v => (+v).toFixed(1)) +
       rng("mx", 0, 22, 1, "Side margins", v => v + "%") +
       '<div class="setRow"><label>Align</label>' + seg("align", [["left","Left"],["justify","Justify"]]) + '</div>' +

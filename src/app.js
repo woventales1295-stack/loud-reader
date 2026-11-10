@@ -258,14 +258,14 @@ const Theme = {
   async init(){
     let saved=null;
     try{ const m=await DB.getMeta(this.SETTINGS_ID); saved=m&&m.theme; }catch(e){}
-    const theme = (["light","dark","sepia","gray","black"].indexOf(saved)>=0) ? saved
+    const theme = (["light","dark","sepia","gray","black","white"].indexOf(saved)>=0) ? saved
       : (window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
     this.apply(theme);
   },
   apply(theme){
     this.current=theme;
     document.documentElement.setAttribute("data-theme", theme);
-    try{ const mt=document.querySelector('meta[name="theme-color"]'); if(mt) mt.content = ({light:"#fbf5e9",dark:"#1e1730",sepia:"#f4ecd8",gray:"#3a3d42",black:"#000000"})[theme]||"#1e1730"; }catch(e){}
+    try{ const mt=document.querySelector('meta[name="theme-color"]'); if(mt) mt.content = ({white:"#f7f7f7",light:"#fbf5e9",dark:"#1e1730",sepia:"#f4ecd8",gray:"#3a3d42",black:"#000000"})[theme]||"#1e1730"; }catch(e){}
     const btn=$("#themeBtn"); if(!btn) return;
     btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18c1.1 0 1.8-.9 1.5-1.9-.3-1 .3-2.1 1.4-2.1H17a4 4 0 004-4c0-5-4-10-9-10zM7.5 12a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm3-4a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm4 0a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm3 4a1.5 1.5 0 110-3 1.5 1.5 0 010 3z"/></svg> Theme &amp; text';
     btn.title = "Theme, fonts and spacing";
