@@ -1823,7 +1823,7 @@ const Covers = {
     if(this.running) return; this.running=true;
     try{
       while(this.queue.length){
-        if(!Shelf.visible || document.hidden){ await new Promise(r=>setTimeout(r,1500)); continue; }   // only while the shelf is on screen: never compete with reading
+        await idleFor(2500);   // only while the shelf is on screen and untouched: never compete with reading or scrolling
         const d=this.queue.shift(); if(!this.want(d)) continue;
         let img=null; try{ img=await this.extract(d.id); }catch(e){ img=null; }
         if(!(await DB.getDoc(d.id).then(x=>!!x).catch(()=>false))) continue;     // deleted meanwhile
@@ -1837,9 +1837,10 @@ const Covers = {
 
 /* ---------- library-wide full-text search: every book is indexed once, in the background ---------- */
 const TEXT_V=1, SEARCH_EXTS=["epub","pdf","docx","mobi","azw","azw3","prc","fb2","txt","md","markdown","html","htm","xhtml"];
+const idleFor=(ms)=>new Promise(async(res)=>{ while(Date.now()-(UI.lastTouch||0)<ms || !Shelf.visible || document.hidden) await new Promise(r=>setTimeout(r,600)); res(); });
 const GSearch = {
   running:false, token:0, status:"", done:0, total:0, q:"",
-  want(d){ return SEARCH_EXTS.includes(extOf(d.name)) && !(d.blob && d.blob.size>140*1024*1024); },
+  want(d){ return SEARCH_EXTS.includes(extOf(d.name)) && !(d.size>80*1024*1024); },
   async blocksFor(doc){
     if(doc.ocrText && doc.ocrText.length) return doc.ocrText;
     let cached=null; try{ cached=await DB.getParsed(doc.id); }catch(e){}
@@ -1863,7 +1864,7 @@ const GSearch = {
     if(this.running) return; this.running=true;
     try{
       for(;;){
-        if(!Shelf.visible || document.hidden){ await new Promise(r=>setTimeout(r,1500)); continue; }
+        await idleFor(3000);       // never work while you are touching the screen or reading
         const docs=(await DB.allDocs()).filter(d=>this.want(d));
         const have=new Set(await DB.allTextKeys().catch(()=>[]));
         const todo=docs.filter(d=>!have.has(d.id));
@@ -1872,7 +1873,7 @@ const GSearch = {
         if(!todo.length) break;
         const d=todo[0]; const full=await DB.getDoc(d.id).catch(()=>null);
         if(full){ try{ await this.indexDoc(full); }catch(e){ try{ await DB.putText({id:d.id, v:TEXT_V, n:0, chunks:[], failed:true}); }catch(_){} } }
-        await new Promise(r=>setTimeout(r,200));
+        await new Promise(r=>setTimeout(r,700));
       }
     } finally { this.running=false; this.paint(); }
   },
@@ -1962,6 +1963,7 @@ const Shelf = {
   },
   async render(){
     if(!this.visible) return;
+    if(typeof Reading!=="undefined" && UI.activeId!=null){ try{ await Reading.flush(); }catch(e){} }
     const {docs,metaById,folders,fids,folderOf}=await this._load();
     if(this.cwd && !fids.has(this.cwd)) this.cwd=null;
     // breadcrumbs
@@ -2252,6 +2254,7 @@ let parseToken=0;
 const PARSE_V=2;
 async function openDoc(id){
   const token=++parseToken; Speech.stop();
+  try{ await Reading.flush(); }catch(e){}
   const doc=await DB.getDoc(id); if(!doc) return;
   UI.activeId=id; Shelf.hide();
   hideOcrBar();
@@ -3098,7 +3101,7 @@ setInterval(()=>{ if(Speech.playing&&speechSynthesis.speaking&&!speechSynthesis.
 /*__READING_JS__*/
 Shelf.show(false);
 
-window.__LoudReader = { Backup, GSearch, Dict, Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
+window.__LoudReader = { UI, Backup, GSearch, Dict, Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
 } /* end appInit */
 </script>
 </body>

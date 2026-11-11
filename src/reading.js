@@ -69,7 +69,7 @@ $("#followChk").onchange = (e) => { if (e.target.checked) Follow.goBack(); else 
 const Reading = {
   pos:0, anchor:null, suspend:0, lastScrollTop:0, userTouching:false,
   chapters:null, chapIdx:-1, bookmarks:[], marksLoadedFor:null,
-  readSecs:0, readWords:0, sessWords:0, lastActive:0, lastTick:0, lastPos:0,
+  statId:null, readSecs:0, readWords:0, sessWords:0, lastActive:0, lastTick:0, lastPos:0,
   searchHits:[], searchIdx:-1, searchQuery:"",
 
   rd(){ return $("#reader"); },
@@ -338,7 +338,7 @@ const Reading = {
     const willPage = !!RS.flip && Reader.words.length > 0 && !(typeof Ink !== "undefined" && Ink.active);
     const rd = this.rd(); if (!willPage){ rd.scrollTop = 0; rd.scrollLeft = 0; }
     this.chapters = null; this.chapIdx = -1; this.anchor = null;
-    this.readSecs = (meta && meta.readSecs) || 0; this.readWords = (meta && meta.readWords) || 0; this.sessWords = 0;
+    this.readSecs = (meta && meta.readSecs) || 0; this.readWords = (meta && meta.readWords) || 0; this.sessWords = 0; this.statId = UI.activeId; this.lastTick = Date.now();
     this.clearSearch(); this.bookmarks = (meta && meta.bookmarks) || []; this.marksLoadedFor = UI.activeId;
     const p = meta && meta.progress > 0 && meta.progress < Reader.words.length ? meta.progress : 0;
     this.pos = p; this.lastPos = p;
@@ -506,17 +506,19 @@ const Reading = {
   _statFlushT:0,
   tick(){
     const now = Date.now();
-    if (!document.body.classList.contains("reading") || document.hidden || !Reader.words.length){ this.lastTick = now; return; }
-    const active = (now - this.lastActive < 45000) || Speech.playing || this._auto;
-    if (active){ this.readSecs += 5; this._dayAdd(5, this.sessWords); this.sessWords = 0; }
+    // only count while this very book is open on screen (stats are loaded per book: see statId)
+    if (!document.body.classList.contains("reading") || document.hidden || !Reader.words.length || this.statId !== UI.activeId || UI.activeId == null){ this.lastTick = now; return; }
+    const dt = Math.max(0, Math.min(10, Math.round((now - this.lastTick) / 1000)));
+    const active = (now - this.lastActive < 150000) || Speech.playing || this._auto;   // 2.5 min without touching = you stopped (a page can take a while to read)
+    if (active && dt){ this.readSecs += dt; this._dayAdd(dt, this.sessWords); this.sessWords = 0; }
     this.lastTick = now;
     if (now - this._statFlushT > 20000){ this._statFlushT = now; this.flush(); }
   },
   _day:null,
   _dayAdd(secs, words){ if (!this._day) this._day = { s:0, w:0 }; this._day.s += secs; this._day.w += words; },
   async flush(){
-    if (UI.activeId != null && Reader.words.length){
-      try{ await DB.setMeta(UI.activeId, { readSecs:this.readSecs, readWords:this.readWords }); }catch(e){}
+    if (UI.activeId != null && this.statId === UI.activeId && Reader.words.length){
+      try{ await DB.setMeta(this.statId, { readSecs:this.readSecs, readWords:this.readWords }); }catch(e){}
     }
     if (this._day && (this._day.s || this._day.w)){
       const d = this._day; this._day = null;
@@ -531,6 +533,8 @@ const Reading = {
   }
 };
 setInterval(() => Reading.tick(), 5000);
+// any touch, key, wheel or scroll counts as being present (pager and zoom gestures never touched the old marker)
+["pointerdown","touchstart","keydown","wheel","scroll"].forEach(ev => document.addEventListener(ev, () => { Reading.lastActive = Date.now(); UI.lastTouch = Date.now(); }, { capture:true, passive:true }));
 document.addEventListener("visibilitychange", () => { if (document.hidden){ Reading.flush(); saveProgress(true); } });
 window.addEventListener("pagehide", () => { Reading.flush(); });
 
