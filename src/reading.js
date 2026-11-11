@@ -885,8 +885,7 @@ $("#annotCopyBtn").onclick = () => {
 $("#annotDefineBtn").onclick = () => {
   const [a, b] = Annot.range(); let t = _selText().replace(/[.,;:!?"“”()\[\]]/g, "").trim(); Annot.cancelSelection();
   if (!t) return; if (b - a > 6) t = t.split(/\s+/).slice(0, 6).join(" ");
-  let ok = false; try{ if (Native.has && AndroidBridge.lookupWord){ AndroidBridge.lookupWord(t); ok = true; } }catch(e){}
-  if (!ok) toast("Look-up needs the Android app");
+  Dict.show(t.split(/\s+/)[0]);
 };
 
 /* volume keys (native calls this) */

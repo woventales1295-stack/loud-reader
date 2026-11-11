@@ -176,7 +176,7 @@ const DB = (() => {
   function open(){
     if (dbp) return dbp;
     dbp = new Promise((res, rej) => {
-      const r = indexedDB.open("loud-reader", 7);
+      const r = indexedDB.open("loud-reader", 8);
       r.onupgradeneeded = () => {
         const db = r.result;
         if (!db.objectStoreNames.contains("docs")) db.createObjectStore("docs", { keyPath:"id" });
@@ -190,6 +190,7 @@ const DB = (() => {
         }
         if (!db.objectStoreNames.contains("parsed")) db.createObjectStore("parsed", { keyPath:"id" });
         if (!db.objectStoreNames.contains("covers")) db.createObjectStore("covers", { keyPath:"id" });
+        if (!db.objectStoreNames.contains("text")) db.createObjectStore("text", { keyPath:"id" });
         if (!db.objectStoreNames.contains("annotations")){
           const store = db.createObjectStore("annotations", { keyPath:"id" });
           store.createIndex("byDoc", "docId", { unique:false });
@@ -217,6 +218,7 @@ const DB = (() => {
     getMeta:(id)=>run("meta","readonly",s=>s.get(id)), allMeta:()=>run("meta","readonly",s=>s.getAll()),
     delMeta:(id)=>run("meta","readwrite",s=>s.delete(id)),
     async setMeta(id,patch){ const cur=(await this.getMeta(id))||{id}; Object.assign(cur,patch,{id}); return run("meta","readwrite",s=>s.put(cur)); },
+    putText:(t)=>run("text","readwrite",s=>s.put(t)), getText:(id)=>run("text","readonly",s=>s.get(id)), allTextKeys:()=>run("text","readonly",s=>s.getAllKeys()), delText:(id)=>run("text","readwrite",s=>s.delete(id)),
     putCover:(c)=>run("covers","readwrite",s=>s.put(c)), allCovers:()=>run("covers","readonly",s=>s.getAll()), delCover:(id)=>run("covers","readwrite",s=>s.delete(id)),
     putParsed:(d)=>run("parsed","readwrite",s=>s.put(d)), getParsed:(id)=>run("parsed","readonly",s=>s.get(id)),
     delParsed:(id)=>run("parsed","readwrite",s=>s.delete(id)),
@@ -1565,6 +1567,93 @@ const UI = {
   refreshLibrary(){ return Shelf.render(); }
 };
 
+/* ---------- offline dictionary (WordNet 3.1, compiled by tools/dict/make_dict.py) ---------- */
+const Dict = {
+  txt:null, starts:null, loading:null,
+  async load(){
+    if(this.txt) return;
+    if(!this.loading) this.loading=(async()=>{
+      const bytes=b64bytes("dict-wn"); const ds=new DecompressionStream("gzip"); const w=ds.writable.getWriter(); w.write(bytes); w.close();
+      const buf=await new Response(ds.readable).arrayBuffer(); const t=new TextDecoder("utf-8").decode(buf);
+      const st=[0]; let p=-1; while((p=t.indexOf("\n",p+1))!==-1 && p+1<t.length) st.push(p+1);
+      this.txt=t; this.starts=st;
+    })();
+    await this.loading;
+  },
+  _entry(w){
+    const t=this.txt, st=this.starts; let lo=0, hi=st.length-1;
+    while(lo<=hi){
+      const mid=(lo+hi)>>1, s=st[mid], tab=t.indexOf("\t",s), key=t.substring(s,tab);
+      if(key===w){ const e=t.indexOf("\n",tab); return t.substring(tab+1, e<0?t.length:e); }
+      if(key<w) lo=mid+1; else hi=mid-1;
+    }
+    return null;
+  },
+  IRR:{ was:"be",were:"be",is:"be",are:"be",am:"be",been:"be",being:"be",had:"have",has:"have",did:"do",does:"do",done:"do",went:"go",gone:"go",goes:"go",saw:"see",seen:"see",took:"take",taken:"take",gave:"give",given:"give",came:"come",made:"make",said:"say",got:"get",gotten:"get",knew:"know",known:"know",thought:"think",told:"tell",found:"find",felt:"feel",left:"leave",kept:"keep",began:"begin",begun:"begin",ran:"run",wrote:"write",written:"write",brought:"bring",bought:"buy",sold:"sell",stood:"stand",heard:"hear",met:"meet",sat:"sit",spoke:"speak",spoken:"speak",rose:"rise",risen:"rise",fell:"fall",fallen:"fall",grew:"grow",grown:"grow",drew:"draw",drawn:"draw",ate:"eat",eaten:"eat",drank:"drink",drunk:"drink",sang:"sing",sung:"sing",swam:"swim",flew:"fly",flown:"fly",threw:"throw",thrown:"throw",broke:"break",broken:"break",chose:"choose",chosen:"choose",wore:"wear",worn:"wear",slept:"sleep",lost:"lose",built:"build",sent:"send",spent:"spend",lay:"lie",lain:"lie",led:"lead",held:"hold",paid:"pay",taught:"teach",caught:"catch",fought:"fight",sought:"seek",won:"win",hid:"hide",hidden:"hide",forgot:"forget",forgotten:"forget",children:"child",men:"man",women:"woman",feet:"foot",teeth:"tooth",mice:"mouse",geese:"goose",people:"person",lives:"life",wives:"wife",knives:"knife",leaves:"leaf",wolves:"wolf",better:"good",best:"good",worse:"bad",worst:"bad",more:"many",most:"many",less:"little",least:"little" },
+  candidates(w){
+    const out=[w]; const add=(x)=>{ if(x && x.length>1 && out.indexOf(x)<0) out.push(x); };
+    if(this.IRR[w]) add(this.IRR[w]);
+    const e=(suf,rep)=>{ if(w.length>suf.length+1 && w.endsWith(suf)) add(w.slice(0,-suf.length)+rep); };
+    e("ies","y"); e("ves","f"); e("ves","fe"); e("ses","s"); e("xes","x"); e("zes","z"); e("ches","ch"); e("shes","sh"); e("men","man"); e("s","");
+    e("ied","y"); e("ed",""); e("ed","e"); e("ing",""); e("ing","e");
+    if(/([b-df-hj-np-tv-z])\1(ed|ing)$/.test(w)) add(w.replace(/([b-df-hj-np-tv-z])\1(ed|ing)$/,"$1"));
+    e("est",""); e("est","e"); e("er",""); e("er","e"); e("ier","y"); e("iest","y"); e("ly",""); e("ily","y"); e("ness",""); e("ment",""); e("'s",""); e("s'","");
+    if(/([b-df-hj-np-tv-z])\1(er|est)$/.test(w)) add(w.replace(/([b-df-hj-np-tv-z])\1(er|est)$/,"$1"));
+    return out;
+  },
+  clean(q){ return String(q||"").toLowerCase().replace(/[’‘`]/g,"'").replace(/^[^a-z0-9]+|[^a-z0-9]+$/g,"").trim(); },
+  async find(q){
+    await this.load(); const w=this.clean(q); if(!w) return null;
+    const hits=[];
+    for(const c of this.candidates(w)){ const e=this._entry(c); if(e){ hits.push({ word:c, form:c!==w?w:null, raw:e }); if(hits.length>=2) break; } }
+    return hits.length?hits:null;
+  },
+  suggest(q){
+    const w=this.clean(q); if(!w||!this.txt) return [];
+    const t=this.txt, st=this.starts; let lo=0, hi=st.length-1;
+    while(lo<hi){ const mid=(lo+hi)>>1; const key=t.substring(st[mid], t.indexOf("\t",st[mid])); if(key<w) lo=mid+1; else hi=mid; }
+    const out=[]; const pre=w.slice(0,Math.max(2,w.length-2));
+    for(let i=Math.max(0,lo-3); i<st.length && out.length<6; i++){ const key=t.substring(st[i], t.indexOf("\t",st[i])); if(key.startsWith(pre) && key!==w) out.push(key); else if(key>pre+"￿") break; }
+    return out;
+  },
+  POSN:{n:"noun",v:"verb",adj:"adjective",adv:"adverb"},
+  async show(q){
+    const card=$("#dictCard"), body=$("#dictBody"), inp=$("#dictIn");
+    card.hidden=false; inp.value=q||""; body.innerHTML='<div class="dnone">Loading dictionary…</div>';
+    if(!q){ body.innerHTML='<div class="dnone">Type a word and tap Look up.</div>'; setTimeout(()=>inp.focus(),60); return; }
+    await this.render(q);
+  },
+  async render(q){
+    const body=$("#dictBody"); const rs=await this.find(q); body.innerHTML="";
+    if(!rs){
+      const d=el("div","dnone"); d.textContent="No entry for “"+this.clean(q)+"”."; body.appendChild(d);
+      const sg=this.suggest(q); if(sg.length){ const w=el("div","dsug"); sg.forEach(x=>{ const b=el("button"); b.textContent=x; b.onclick=()=>{ $("#dictIn").value=x; this.render(x); }; w.appendChild(b); }); body.appendChild(w); }
+      return;
+    }
+    rs.forEach((r,ri)=>this._renderOne(body,r,ri));
+    body.scrollTop=0;
+  },
+  _renderOne(body,r,ri){
+    const h=el("div","dw"); h.textContent=r.word; if(ri) h.style.marginTop="22px"; body.appendChild(h);
+    if(r.form){ const f=el("div","dform"); f.textContent="“"+r.form+"” is a form of “"+r.word+"”"; body.appendChild(f); }
+    const by={}; const order=[];
+    r.raw.split("¦").forEach(s=>{ const [pos,df,ex,sy]=s.split("|"); if(!by[pos]){ by[pos]=[]; order.push(pos); } by[pos].push({df,ex,sy}); });
+    order.forEach(pos=>{
+      const tag=el("span","dpos"); tag.textContent=this.POSN[pos]||pos; body.appendChild(tag);
+      const ol=el("ol"); by[pos].forEach(x=>{ const li=el("li"); li.appendChild(document.createTextNode(x.df));
+        if(x.ex){ const e=el("span","dex"); e.textContent="“"+x.ex+"”"; li.appendChild(e); }
+        if(x.sy){ const y=el("span","dsyn"); y.innerHTML="<b>Also:</b> "; y.appendChild(document.createTextNode(x.sy.split(",").join(", "))); li.appendChild(y); }
+        ol.appendChild(li); }); body.appendChild(ol);
+    });
+  },
+  hide(){ $("#dictCard").hidden=true; }
+};
+$("#dictGo").onclick=()=>Dict.render($("#dictIn").value);
+$("#dictIn").addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); Dict.render($("#dictIn").value); $("#dictIn").blur(); } });
+$("#dictClose").onclick=()=>Dict.hide();
+$("#dictCard").addEventListener("click",(e)=>{ if(e.target.id==="dictCard") Dict.hide(); });
+$("#dictMenuBtn").onclick=()=>{ closeMoreMenu(); Dict.show(""); };
+
 /* ---------- book covers: pulled out of the file once, kept as a small JPEG ---------- */
 const COVER_V=1;
 const Covers = {
@@ -1679,6 +1768,110 @@ const Covers = {
   }
 };
 
+/* ---------- library-wide full-text search: every book is indexed once, in the background ---------- */
+const TEXT_V=1, SEARCH_EXTS=["epub","pdf","docx","mobi","azw","azw3","prc","fb2","txt","md","markdown","html","htm","xhtml"];
+const GSearch = {
+  running:false, token:0, status:"", done:0, total:0, q:"",
+  want(d){ return SEARCH_EXTS.includes(extOf(d.name)) && !(d.blob && d.blob.size>140*1024*1024); },
+  async blocksFor(doc){
+    if(doc.ocrText && doc.ocrText.length) return doc.ocrText;
+    let cached=null; try{ cached=await DB.getParsed(doc.id); }catch(e){}
+    if(cached && cached.blocks && cached.v===PARSE_V) return cached.blocks;
+    return parseDoc(doc,null,{});
+  },
+  async indexDoc(doc){
+    const blocks=await this.blocksFor(doc); const chunks=[]; let w=0, cur=null, cn=0;
+    for(const b of blocks){
+      if(!b || b.img) continue;
+      const toks=(Array.isArray(b.words)&&b.words.length)?b.words.map(x=>x.str):String(b.text||"").split(/\s+/).filter(Boolean);
+      if(!toks.length) continue;
+      if(!cur){ cur={w0:w, parts:[]}; cn=0; }
+      cur.parts.push(toks.join(" ")); cn+=toks.length; w+=toks.length;
+      if(cn>=1200){ chunks.push({w0:cur.w0, t:cur.parts.join(" ")}); cur=null; }
+    }
+    if(cur) chunks.push({w0:cur.w0, t:cur.parts.join(" ")});
+    await DB.putText({id:doc.id, v:TEXT_V, n:w, chunks});
+  },
+  async pump(){
+    if(this.running) return; this.running=true;
+    try{
+      for(;;){
+        if(!Shelf.visible || document.hidden){ await new Promise(r=>setTimeout(r,1500)); continue; }
+        const docs=(await DB.allDocs()).filter(d=>this.want(d));
+        const have=new Set(await DB.allTextKeys().catch(()=>[]));
+        const todo=docs.filter(d=>!have.has(d.id));
+        this.total=docs.length; this.done=docs.length-todo.length;
+        this.paint();
+        if(!todo.length) break;
+        const d=todo[0]; const full=await DB.getDoc(d.id).catch(()=>null);
+        if(full){ try{ await this.indexDoc(full); }catch(e){ try{ await DB.putText({id:d.id, v:TEXT_V, n:0, chunks:[], failed:true}); }catch(_){} } }
+        await new Promise(r=>setTimeout(r,200));
+      }
+    } finally { this.running=false; this.paint(); }
+  },
+  paint(){
+    const st=$("#gStatus"); if(!st) return;
+    if(this.total && this.done<this.total){ st.hidden=false; st.textContent="Indexing books for search… "+this.done+" of "+this.total; }
+    else if(this.q){ st.hidden=false; st.textContent="Searched "+this.total+" book"+(this.total===1?"":"s"); }
+    else st.hidden=true;
+  },
+  esc(t){ return t.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); },
+  async search(q){
+    q=q.trim(); const tok=++this.token; this.q=q;
+    const box=$("#gResults"); const on=q.length>0; document.body.classList.toggle("searching",on); box.hidden=!on; $("#gClear").hidden=!on;
+    if(!on){ this.paint(); Shelf.render(); return; }
+    this.pump();
+    if(q.length<2){ box.innerHTML='<div class="gnone">Type at least 2 letters.</div>'; return; }
+    const needle=q.toLowerCase().replace(/\s+/g," ");
+    const docs=await DB.allDocs(); const metas=await DB.allMeta(); const covers=Covers; await covers.load();
+    const out=[]; let total=0;
+    for(const d of docs){
+      if(tok!==this.token) return;
+      const nameHit=d.name.toLowerCase().includes(needle);
+      let rec=null; try{ rec=await DB.getText(d.id); }catch(e){}
+      const hits=[];
+      if(rec && rec.chunks){
+        for(const ch of rec.chunks){
+          const low=ch.t.toLowerCase(); let from=0, at, lastOff=0, lastW=ch.w0;
+          while((at=low.indexOf(needle,from))!==-1 && hits.length<300){
+            for(let k=lastOff;k<at;k++) if(low.charCodeAt(k)===32) lastW++;
+            lastOff=at;
+            const s=Math.max(0,at-46), e=Math.min(ch.t.length,at+needle.length+70);
+            hits.push({w:lastW, pre:(s>0?"…":"")+ch.t.slice(s,at), mid:ch.t.slice(at,at+needle.length), post:ch.t.slice(at+needle.length,e)+(e<ch.t.length?"…":"")});
+            from=at+Math.max(1,needle.length);
+          }
+          if(hits.length>=300) break;
+        }
+      }
+      if(nameHit||hits.length){ out.push({d,hits,nameHit}); total+=hits.length; }
+    }
+    if(tok!==this.token) return;
+    out.sort((a,b)=>(b.nameHit-a.nameHit)||(b.hits.length-a.hits.length));
+    box.innerHTML="";
+    if(!out.length){ const n=el("div","gnone"); n.textContent=(this.done<this.total)?"No matches yet — still indexing "+(this.total-this.done)+" book(s).":"No matches for “"+q+"”."; box.appendChild(n); this.paint(); return; }
+    const hueOf=(str)=>{ let h=0; for(let i=0;i<str.length;i++) h=(h*31+str.charCodeAt(i))>>>0; return [12,24,36,48,92,150,178,205,258,282,322,350][h%12]; };
+    out.forEach(r=>{
+      const card=el("div","gbook"); const head=el("div","gtitle"); const sw=el("div","sw"); const title=r.d.name.replace(/\.[^.]+$/,"");
+      sw.style.setProperty("--h",hueOf(title)); const cu=covers.url(r.d.id); if(cu) sw.style.backgroundImage="url("+cu+")";
+      const b=el("b"); b.textContent=title; const sm=el("small"); sm.textContent=r.hits.length?(r.hits.length>=300?"300+":r.hits.length)+" match"+(r.hits.length===1?"":"es"):"title match";
+      head.append(sw,b,sm); head.onclick=()=>this.open(r.d.id,null); card.appendChild(head);
+      const mk=(h)=>{ const x=el("button","ghit"); x.innerHTML=this.esc(h.pre)+"<mark>"+this.esc(h.mid)+"</mark>"+this.esc(h.post); x.onclick=()=>this.open(r.d.id,h.w); return x; };
+      r.hits.slice(0,4).forEach(h=>card.appendChild(mk(h)));
+      if(r.hits.length>4){ const m=el("button","gmore"); m.textContent="Show "+(Math.min(r.hits.length,300)-4)+" more"; m.onclick=()=>{ m.remove(); r.hits.slice(4,60).forEach(h=>card.appendChild(mk(h))); }; card.appendChild(m); }
+      box.appendChild(card);
+    });
+    this.paint();
+  },
+  async open(id,w){
+    const q=this.q; $("#gSearch").value=""; this.token++; this.q=""; document.body.classList.remove("searching"); $("#gResults").hidden=true; $("#gClear").hidden=true;
+    if(w!=null) await DB.setMeta(id,{progress:w});
+    await openDoc(id);
+    if(w!=null){ setTimeout(()=>{ try{ const hits=Reading.search(q); if(hits.length){ let bi=0,bd=1e12; hits.forEach((h,i)=>{ const dd=Math.abs(h.a-w); if(dd<bd){ bd=dd; bi=i; } }); Reading.gotoHit(bi); } }catch(e){} },500); }
+  }
+};
+{ let t=0; $("#gSearch").addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>GSearch.search($("#gSearch").value),260); }); }
+$("#gClear").onclick=()=>{ $("#gSearch").value=""; GSearch.search(""); };
+
 /* ---------- shelf: library home screen with folders ---------- */
 const Shelf = {
   cwd:null, visible:false, overReader:false, sort:"recent",
@@ -1720,6 +1913,8 @@ const Shelf = {
     if(this.sort==="name") here.sort((a,b)=>naturalCmp(a.name,b.name));
     else if(this.sort==="progress") here.sort((a,b)=>pctOf(b)-pctOf(a)||last(b)-last(a));
     else here.sort((a,b)=>last(b)-last(a));
+    this._renderNow(docs,metaById);
+    GSearch.pump();
     const list=$("#libList"); list.innerHTML="";
     if(!subs.length && !here.length){
       list.innerHTML = this.cwd ? '<div class="empty">This folder is empty.<br>Tap “Add files” to import books here.</div>'
@@ -1765,6 +1960,24 @@ const Shelf = {
     });
     Covers.request(here);
   },
+  _renderNow(docs,metaById){
+    const box=$("#nowRead"); const strip=box.querySelector(".nowStrip"); strip.innerHTML="";
+    const fmt=(s)=>s>=3600?Math.floor(s/3600)+"h "+String(Math.floor(s%3600/60)).padStart(2,"0")+"m":Math.max(1,Math.round(s/60))+" min";
+    const act=docs.map(d=>{ const m=metaById[d.id]||{}; const wc=m.wordCount||0; const pct=(m.progress>0&&wc>1)?m.progress/(wc-1):0; return {d,secs:m.readSecs||0,pct,last:m.lastOpened||0}; })
+      .filter(x=>(x.secs>=60 || x.pct>0.005) && x.pct<0.985)
+      .sort((a,b)=>(b.secs-a.secs)||(b.last-a.last)).slice(0,8);
+    if(!act.length || this.cwd || this.selectMode){ box.hidden=true; return; }
+    const hueOf=(str)=>{ let h=0; for(let i=0;i<str.length;i++) h=(h*31+str.charCodeAt(i))>>>0; return [12,24,36,48,92,150,178,205,258,282,322,350][h%12]; };
+    act.forEach((x,i)=>{
+      const li=el("div","bk"); li.title=x.d.name; const title=x.d.name.replace(/\.[^.]+$/,"").replace(/[_]+/g," "); li.style.setProperty("--h",hueOf(title));
+      const cv=el("div","cover"); const t=el("div","ttl"); t.textContent=title; const fm=el("div","fmt"); fm.textContent=extOf(x.d.name).toUpperCase().slice(0,5); cv.append(t,fm);
+      const cu=Covers.url(x.d.id); if(cu){ cv.classList.add("img"); cv.style.backgroundImage="url("+cu+")"; }
+      const pc=Math.round(x.pct*100); if(pc>0){ const bar=el("div","pc"); const ii=el("i"); ii.style.width=pc+"%"; bar.appendChild(ii); cv.appendChild(bar); }
+      const rk=el("div","rk"); rk.textContent="#"+(i+1); const tm=el("div","tm"); tm.textContent=x.secs>=60?fmt(x.secs):(pc+"%");
+      li.append(cv,rk,tm); li.onclick=()=>openDoc(x.d.id); strip.appendChild(li);
+    });
+    box.hidden=false;
+  },
   applyCover(id){
     const li=document.querySelector('#libList li.bk[data-id="'+id+'"]'); const u=Covers.url(id); if(!li||!u) return;
     const cv=li.querySelector(".cover"); if(cv){ cv.classList.add("img"); cv.style.backgroundImage="url("+u+")"; }
@@ -1796,7 +2009,7 @@ const Shelf = {
   _subtree(folders,id){ const out=new Set([id]); let grew=true; while(grew){ grew=false; folders.forEach(f=>{ if(f.parent && out.has(f.parent) && !out.has(f.id)){ out.add(f.id); grew=true; } }); } return out; },
   async _purgeBook(id){
     if(UI.activeId===id) closeCurrentDoc();
-    await Promise.all([DB.delDoc(id),DB.delParsed(id).catch(()=>{}),DB.delCover(id).catch(()=>{}),DB.delMeta(id),DB.delAnnotationsForDoc(id),DB.delInkForDoc(id)]);
+    await Promise.all([DB.delDoc(id),DB.delParsed(id).catch(()=>{}),DB.delCover(id).catch(()=>{}),DB.delText(id).catch(()=>{}),DB.delMeta(id),DB.delAnnotationsForDoc(id),DB.delInkForDoc(id)]);
     if(comicCache.id===id){ comicCache.id=null; comicCache.entries=null; }
     Covers.map.delete(id);
     this.selected.delete(id);
@@ -2295,9 +2508,20 @@ const Annot = {
       wrapper.appendChild(elx); this._selPreviewEl=elx;
     } else {
       for(let i=a;i<=b;i++){ const w=Reader.words[i]; if(w&&w.span) w.span.classList.add("sel-preview"); }
+      this._joinParas(a,b,"hlj-sel");
+    }
+  },
+  // paint the gap between two paragraphs when a highlight runs from one into the next
+  _joinParas(a,b,cls){
+    let prev=null;
+    for(let i=a;i<=b;i++){
+      const w=Reader.words[i]; const sp=w && w.span; const p=sp && sp.parentNode && sp.parentNode.closest ? sp.parentNode.closest("p") : null;
+      if(prev && p && p!==prev){ prev.classList.add("hlj",cls); }
+      if(p) prev=p;
     }
   },
   _clearSelectionOverlay(){
+    document.querySelectorAll("p.hlj-sel").forEach(p=>p.classList.remove("hlj","hlj-sel"));
     if (this._selPreviewEl){ this._selPreviewEl.remove(); this._selPreviewEl=null; }
     document.querySelectorAll(".w.sel-preview").forEach(s=>s.classList.remove("sel-preview"));
   },
@@ -2369,6 +2593,7 @@ const Annot = {
   renderAll(){
     document.querySelectorAll(".pdfannot:not(.sel-preview-pdf)").forEach(n=>n.remove());
     document.querySelectorAll(".w.hl-yellow,.w.hl-green,.w.hl-pink,.w.hl-blue").forEach(s=>s.classList.remove("hl-yellow","hl-green","hl-pink","hl-blue"));
+    document.querySelectorAll("p.hlj:not(.hlj-sel)").forEach(p=>p.classList.remove("hlj","hlj-yellow","hlj-green","hlj-pink","hlj-blue"));
     document.querySelectorAll(".note-icon").forEach(n=>n.remove());
     this.items.forEach(a=>this.renderOne(a));
   },
@@ -2392,6 +2617,7 @@ const Annot = {
       }
     } else {
       for(let i=a.startWord;i<=a.endWord;i++){ const w=Reader.words[i]; if(w&&w.span) w.span.classList.add("hl-"+a.color); }
+      this._joinParas(a.startWord,a.endWord,"hlj-"+a.color);
       if (a.note){
         const w=Reader.words[a.startWord];
         if (w&&w.span&&w.span.parentNode){
@@ -2728,6 +2954,7 @@ $("#saveTextBtn").onclick=async()=>{
 
 /* ---------- back button (called from MainActivity.onBackPressed) ---------- */
 window.__handleBack=function(){
+  if(!$("#dictCard").hidden){ Dict.hide(); return true; }
   if(!$("#dlg").hidden){ dlgClose(null); return true; }
   if(Shelf.visible && Shelf.selectMode){ Shelf.exitSelectMode(); return true; }
   if(!$("#noteModal").hidden){ $("#noteCancelBtn").click(); return true; }
@@ -2804,7 +3031,7 @@ setInterval(()=>{ if(Speech.playing&&speechSynthesis.speaking&&!speechSynthesis.
 /*__READING_JS__*/
 Shelf.show(false);
 
-window.__LoudReader = { Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
+window.__LoudReader = { GSearch, Dict, Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
 } /* end appInit */
 </script>
 </body>

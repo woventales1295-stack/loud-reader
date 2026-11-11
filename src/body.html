@@ -26,6 +26,7 @@
     <span>of <span id="pageTotal">1</span></span>
     <button id="pageGoBtn">Go</button>
   </div>
+  <button id="dictMenuBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M18 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/></svg> Dictionary</button>
   <button id="searchMenuBtn" class="menu-item" data-needdoc><svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg> Search in book</button>
   <button id="gotoPageBtn" class="menu-item" data-needdoc><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm2 14h-3v3h-2v-3H8v-2h3v-3h2v3h3v2zM13 9V3.5L18.5 9H13z"/></svg> Go to page…</button>
   <button id="fullscreenBtn" class="menu-item" data-needdoc><svg viewBox="0 0 24 24"><path d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM4 14h2v4h4v2H4v-6zm16 0h-2v4h-4v2h6v-6z"/></svg> Fullscreen reading</button>
@@ -35,6 +36,13 @@
 
 <div class="layout">
   <section id="shelf" hidden>
+    <div id="gSearchBar">
+      <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      <input id="gSearch" type="search" placeholder="Search all your books…" autocomplete="off" spellcheck="false" />
+      <button id="gClear" hidden aria-label="Clear search"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" fill="none"/></svg></button>
+    </div>
+    <div id="gStatus" hidden></div>
+    <div id="gResults" hidden></div>
     <div class="shelfTop">
       <nav id="crumbs"></nav>
       <div class="tools">
@@ -45,6 +53,7 @@
       <select id="sortSel" title="Sort"><option value="recent">Recent</option><option value="name">Name</option><option value="progress">Progress</option></select>
       </div>
     </div>
+    <section id="nowRead" hidden><div class="nowHead"><b>Reading now</b><span>ranked by time spent</span></div><div class="nowStrip"></div></section>
     <ul id="libList"></ul>
     <div id="selectBar" hidden>
       <span id="selectCount">0 selected</span>
@@ -145,6 +154,17 @@
   </div>
 </div>
 
+<div id="dictCard" hidden>
+  <div class="dictSheet">
+    <div class="dictTop">
+      <input id="dictIn" type="search" placeholder="Look up a word" autocomplete="off" autocapitalize="none" spellcheck="false" />
+      <button id="dictGo" class="btn-accent">Look up</button>
+      <button id="dictClose" title="Close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" fill="none"/></svg></button>
+    </div>
+    <div id="dictBody"></div>
+    <div class="dictFoot">Offline dictionary · WordNet® 3.1, Princeton University</div>
+  </div>
+</div>
 <div id="dlg" hidden>
   <div class="modalCard">
     <h3 id="dlgTitle"></h3>

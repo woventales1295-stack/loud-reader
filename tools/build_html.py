@@ -15,6 +15,7 @@ libs = rd("libs.html").rstrip("\n") + "\n"
 libs += '<script type="text/b64" id="lib-mobi">%s</script>\n' % b64("mobi.js")
 libs += '<script type="text/b64" id="lib-unrar">%s</script>\n' % b64("unrar_bundle.js")
 libs += '<script type="text/b64" id="unrar-wasm">%s</script>\n' % b64("unrar.wasm")
+libs += '<script type="text/b64" id="dict-wn">%s</script>\n' % base64.b64encode(open(os.path.join(here, "dict", "wordnet.txt.gz"), "rb").read()).decode()
 app = rd("app.js")
 assert "/*__READING_JS__*/" in app
 app = app.replace("/*__READING_JS__*/", rd("reading.js") + "\n" + rd("pager.js"))
