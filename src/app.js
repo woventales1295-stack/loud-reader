@@ -218,6 +218,7 @@ const DB = (() => {
     getMeta:(id)=>run("meta","readonly",s=>s.get(id)), allMeta:()=>run("meta","readonly",s=>s.getAll()),
     delMeta:(id)=>run("meta","readwrite",s=>s.delete(id)),
     async setMeta(id,patch){ const cur=(await this.getMeta(id))||{id}; Object.assign(cur,patch,{id}); return run("meta","readwrite",s=>s.put(cur)); },
+    getAllOf:(st)=>run(st,"readonly",s=>s.getAll()), putOf:(st,o)=>run(st,"readwrite",s=>s.put(o)), clearOf:(st)=>run(st,"readwrite",s=>s.clear()),
     putText:(t)=>run("text","readwrite",s=>s.put(t)), getText:(id)=>run("text","readonly",s=>s.get(id)), allTextKeys:()=>run("text","readonly",s=>s.getAllKeys()), delText:(id)=>run("text","readwrite",s=>s.delete(id)),
     putCover:(c)=>run("covers","readwrite",s=>s.put(c)), allCovers:()=>run("covers","readonly",s=>s.getAll()), delCover:(id)=>run("covers","readwrite",s=>s.delete(id)),
     putParsed:(d)=>run("parsed","readwrite",s=>s.put(d)), getParsed:(id)=>run("parsed","readonly",s=>s.get(id)),
@@ -1566,6 +1567,72 @@ const UI = {
   updateSeek(){ /* the reading position drives the progress UI now: see Reading.update */ },
   refreshLibrary(){ return Shelf.render(); }
 };
+
+/* ---------- backup & restore: everything in one file (books, folders, highlights, notes, ink, settings, reading stats) ---------- */
+const Backup = {
+  FORMAT:"loudreader-backup", VER:1,
+  async make(){
+    await ensureZip(); const zip=new JSZip();
+    setStatus("Backing up… collecting data");
+    const ids=(await DB.allDocs()).map(d=>d.id); const docsMeta=[];
+    for(let i=0;i<ids.length;i++){
+      const d=await DB.getDoc(ids[i]); if(!d) continue;
+      const {blob,...rest}=d; docsMeta.push(rest);
+      if(blob) zip.file("books/"+d.id, blob, {binary:true});
+      setStatus("Backing up… "+(i+1)+" of "+ids.length+" books");
+      await new Promise(r=>setTimeout(r,0));
+    }
+    const data={format:this.FORMAT, version:this.VER, created:Date.now(), docs:docsMeta,
+      meta:await DB.getAllOf("meta"), annotations:await DB.getAllOf("annotations"), ink:await DB.getAllOf("ink")};
+    zip.file("data.json", JSON.stringify(data));
+    const out=await zip.generateAsync({type:"blob", compression:"STORE", streamFiles:true},(m)=>setStatus("Backing up… packing "+Math.round(m.percent)+"%"));
+    return {blob:out, books:docsMeta.length, notes:data.annotations.length};
+  },
+  async backup(){
+    closeMoreMenu();
+    try{
+      const r=await this.make(); const d=new Date(); const name="LoudReader-backup-"+d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")+".lrbackup";
+      const res=await Native.saveBlob(name,"application/zip",r.blob); setStatus("");
+      if(res&&res.ok) await dlgAlert("Backup saved", r.books+" book"+(r.books===1?"":"s")+", "+r.notes+" highlight/note"+(r.notes===1?"":"s")+" and your settings were saved ("+(r.blob.size/1048576).toFixed(1)+" MB)"+(Native.has?" to Downloads/LoudReader.":"."));
+      else await dlgAlert("Backup failed","The file couldn't be saved. Check free storage and try again.");
+    }catch(e){ setStatus(""); await dlgAlert("Backup failed",String(e&&e.message||e)); }
+  },
+  restorePick(){ closeMoreMenu(); const inp=$("#backupInput"); inp.value=""; inp.click(); },
+  async restore(file){
+    if(!file) return;
+    try{
+      await ensureZip(); setStatus("Reading backup…");
+      const zip=await JSZip.loadAsync(file); const j=zip.file("data.json");
+      if(!j) throw new Error("This isn't a Loud Reader backup file.");
+      const data=JSON.parse(await j.async("string"));
+      if(data.format!==this.FORMAT) throw new Error("This isn't a Loud Reader backup file.");
+      if(data.version>this.VER) throw new Error("This backup was made by a newer version of the app. Update the app first.");
+      const mode=await dlgChoose("Restore "+data.docs.length+" book"+(data.docs.length===1?"":"s")+" from backup",[
+        {label:"Merge with my current library",value:"merge"},
+        {label:"Replace everything with the backup",value:"replace",danger:true}]);
+      if(!mode){ setStatus(""); return; }
+      if(mode==="replace"){ if(!await dlgConfirm("Replace everything?","Your current books, highlights and settings will be erased and replaced by the backup. This can’t be undone.","Replace")){ setStatus(""); return; }
+        for(const st of ["docs","lib","meta","annotations","ink","parsed","covers","text"]) await DB.clearOf(st); }
+      const have=new Set((await DB.allDocs()).map(d=>d.id)); let added=0, i=0;
+      for(const d of data.docs){
+        i++; setStatus("Restoring… "+i+" of "+data.docs.length+" books");
+        if(have.has(d.id)) continue;
+        const f=zip.file("books/"+d.id); if(!f) continue;
+        const blob=await f.async("blob"); await DB.putDoc(Object.assign({},d,{blob})); added++;
+        await new Promise(r=>setTimeout(r,0));
+      }
+      for(const m of data.meta){ if(mode==="merge" && m.id!==Theme.SETTINGS_ID){ const cur=await DB.getMeta(m.id); if(cur){ if((cur.readSecs||0)>=(m.readSecs||0)) continue; } } await DB.putOf("meta",m); }
+      for(const a of data.annotations) await DB.putOf("annotations",a);
+      for(const k of data.ink) await DB.putOf("ink",k);
+      setStatus("");
+      await dlgAlert("Restore complete", added+" book"+(added===1?"":"s")+" added, "+data.annotations.length+" highlights/notes and your settings restored. The app will now reload.");
+      location.reload();
+    }catch(e){ setStatus(""); await dlgAlert("Restore failed",String(e&&e.message||e)); }
+  }
+};
+$("#backupBtn").onclick=()=>Backup.backup();
+$("#restoreBtn").onclick=()=>Backup.restorePick();
+$("#backupInput").addEventListener("change",(e)=>{ const f=e.target.files&&e.target.files[0]; if(f) Backup.restore(f); });
 
 /* ---------- offline dictionary (WordNet 3.1, compiled by tools/dict/make_dict.py) ---------- */
 const Dict = {
@@ -3031,7 +3098,7 @@ setInterval(()=>{ if(Speech.playing&&speechSynthesis.speaking&&!speechSynthesis.
 /*__READING_JS__*/
 Shelf.show(false);
 
-window.__LoudReader = { GSearch, Dict, Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
+window.__LoudReader = { Backup, GSearch, Dict, Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
 } /* end appInit */
 </script>
 </body>
