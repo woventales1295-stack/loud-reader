@@ -217,7 +217,9 @@ const DB = (() => {
       tx.objectStore("docs").delete(id); tx.objectStore("lib").delete(id); tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); }); },
     getMeta:(id)=>run("meta","readonly",s=>s.get(id)), allMeta:()=>run("meta","readonly",s=>s.getAll()),
     delMeta:(id)=>run("meta","readwrite",s=>s.delete(id)),
-    async setMeta(id,patch){ const cur=(await this.getMeta(id))||{id}; Object.assign(cur,patch,{id}); return run("meta","readwrite",s=>s.put(cur)); },
+    setMeta(id,patch){   // serialised: two overlapping read-modify-writes used to overwrite each other's fields (lost saved positions)
+      const job=()=>this.getMeta(id).then(cur=>{ cur=cur||{id}; Object.assign(cur,patch,{id}); return run("meta","readwrite",s=>s.put(cur)); });
+      const r=(this._mq||Promise.resolve()).then(job,job); this._mq=r.catch(()=>{}); return r; },
     getAllOf:(st)=>run(st,"readonly",s=>s.getAll()), putOf:(st,o)=>run(st,"readwrite",s=>s.put(o)), clearOf:(st)=>run(st,"readwrite",s=>s.clear()),
     putText:(t)=>run("text","readwrite",s=>s.put(t)), getText:(id)=>run("text","readonly",s=>s.get(id)), allTextKeys:()=>run("text","readonly",s=>s.getAllKeys()), delText:(id)=>run("text","readwrite",s=>s.delete(id)),
     putCover:(c)=>run("covers","readwrite",s=>s.put(c)), allCovers:()=>run("covers","readonly",s=>s.getAll()), delCover:(id)=>run("covers","readwrite",s=>s.delete(id)),
@@ -1550,7 +1552,14 @@ function highlightPdf(i, noScroll){
 
 let _saveT=0;
 function saveProgress(force){
-  if(UI.activeId==null || !Reader.words.length) return;
+  if(UI.activeId==null) return;
+  if(!Reader.words.length){
+    if(!Reading.imageOnly() || Reading.statId!==UI.activeId) return;
+    const now=Date.now(); if(!force && now-_saveT<2500) return; _saveT=now;
+    const pg=Reading.pageNow(), tp=Reader.totalPages||1;
+    DB.setMeta(UI.activeId,{ page:pg, progress:pg-1, wordCount:tp, lastOpened:now });   // pct = (page-1)/(pages-1) in the shelf maths
+    return;
+  }
   const now=Date.now(); if(!force && now-_saveT<2500) return; _saveT=now;
   DB.setMeta(UI.activeId,{ progress:Reading.pos, audioPos:Speech.cursor, wordCount:Reader.words.length, lastOpened:now });
 }
@@ -2275,7 +2284,7 @@ async function openDoc(id){
       }
     }
     if(token!==parseToken) return;
-    if(!blocks.length && !(doc._ctx&&doc._ctx.comic)) blocks=["(No readable text was found in this document.)"];
+    if(!blocks.length && !(doc._ctx&&(doc._ctx.comic||(isPagedExt(extOf(doc.name))&&doc._ctx.pages>0)))) blocks=["(No readable text was found in this document.)"];
     finishOpen(doc,blocks,fromOcr);
   }catch(err){ if(token!==parseToken) return; console.error(err);
     $("#content").innerHTML='<div class="welcome"><h1>⚠️</h1><p>Could not read this file.</p></div>'; setStatus("Error: "+(err.message||err)); }
@@ -2291,7 +2300,7 @@ async function finishOpen(doc, blocks, fromOcr){
   const isComic = isComicExt(ext);
   let mode = "text";
   let autoFellBack=false;
-  if (isComic && !fromOcr){ mode="pdf"; }   // nothing to reflow until OCR has produced text
+  if ((isComic || (isPdf && !blocks.length && doc._ctx && doc._ctx.pages>0)) && !fromOcr){ mode="pdf"; }   // nothing to reflow until OCR has produced text
   else if (isPdf){
     let pref="pdf";
     try{ const s=await DB.getMeta(Theme.SETTINGS_ID); if(s&&s.viewMode) pref=s.viewMode; }catch(e){}
@@ -2315,7 +2324,7 @@ async function finishOpen(doc, blocks, fromOcr){
   Speech.cursor = (meta && meta.audioPos>0 && meta.audioPos<Reader.words.length) ? meta.audioPos : 0;
   resumedPct = Reading.restore(meta) || 0;
   Reading.syncChrome();
-  DB.setMeta(doc.id,{ wordCount:Reader.words.length, lastOpened:Date.now() });
+  DB.setMeta(doc.id,Reader.words.length?{ wordCount:Reader.words.length, lastOpened:Date.now() }:{ lastOpened:Date.now() });
   const wc=Reader.bodyWordCount; const base=`${wc.toLocaleString()} words · ${Reader.starts.length.toLocaleString()} sentences`;
   const fallbackNote = autoFellBack ? " (switched to text view — this document has no word positions to tap in PDF view)" : "";
   setStatus((resumedPct?`Resumed at ${resumedPct}% · ${base}.`:`Ready · ${base}.`)+` ${fallbackNote}`);
@@ -3068,7 +3077,7 @@ $("#rate").oninput=(e)=>{ $("#rateVal").textContent=parseFloat(e.target.value).t
 $("#rate").addEventListener("change",()=>{ try{DB.setMeta(Theme.SETTINGS_ID,{ttsRate:$("#rate").value,ttsPitch:$("#pitch").value});}catch(e){} });
 $("#pitch").oninput=(e)=>{ $("#pitchVal").textContent=parseFloat(e.target.value).toFixed(1); if(Speech.playing) Speech.speakFrom(Speech.cursor); };
 $("#voiceSel").onchange=()=>{ if(Speech.playing) Speech.speakFrom(Speech.cursor); };
-$("#menuBtn").onclick=()=>{ if(Shelf.visible){ if(UI.activeId!=null) Shelf.hide(); } else Shelf.show(true); };
+$("#menuBtn").onclick=()=>{ if(!Shelf.visible){ try{ Reading.update(true); saveProgress(true); Reading.flush(); }catch(e){} } if(Shelf.visible){ if(UI.activeId!=null) Shelf.hide(); } else Shelf.show(true); };
 $("#addBtn").onclick=()=>$("#fileInput").click();
 $("#welcomeAdd").onclick=()=>$("#fileInput").click();
 $("#fileInput").onchange=(e)=>{ importFiles(e.target.files); e.target.value=""; };
@@ -3106,3 +3115,5 @@ window.__LoudReader = { UI, Backup, GSearch, Dict, Theme, Pager, Reading, Settin
 </script>
 </body>
 </html>
+
+window.addEventListener("pagehide",()=>{ try{ saveProgress(true); }catch(e){} });

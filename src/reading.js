@@ -95,6 +95,12 @@ const Reading = {
     }
     return clamp(i - 1, 0, Reader.words.length - 1);
   },
+  /* comics and scanned PDFs without any text words: progress is a page number, not a word index */
+  imageOnly(){ return Reader.mode === "pdf" && !Reader.words.length && (Reader.totalPages || 0) > 0; },
+  pageNow(){
+    const w1 = Reader.pageWrappers[1]; if (!w1) return 1;
+    return clamp(this._firstPageBelow(this.topLine()), 1, Reader.totalPages || 1);
+  },
   measure(){
     if (!Reader.words.length) return null;
     if (Pager.on){
@@ -218,6 +224,7 @@ const Reading = {
   /* --- scroll tracking --- */
   update(force){
     if (this.suspend && !force) return;
+    if (this.imageOnly()){ this.lastActive = Date.now(); this.updateProgressUI(); saveProgress(); return; }
     const a = this.measure(); if (!a) return;
     this.anchor = a; const old = this.pos; this.pos = a.i;
     const d = a.i - old;
@@ -340,6 +347,17 @@ const Reading = {
     this.chapters = null; this.chapIdx = -1; this.anchor = null;
     this.readSecs = (meta && meta.readSecs) || 0; this.readWords = (meta && meta.readWords) || 0; this.sessWords = 0; this.statId = UI.activeId; this.lastTick = Date.now();
     this.clearSearch(); this.bookmarks = (meta && meta.bookmarks) || []; this.marksLoadedFor = UI.activeId;
+    if (this.imageOnly()){
+      const pg = meta && meta.page > 1 ? Math.min(meta.page, Reader.totalPages) : 1; this.pos = 0; this.lastPos = 0;
+      const goPg = () => {
+        const w = Reader.pageWrappers[pg]; if (!w) return;
+        this.suspend++;
+        try{ rd.scrollTop = Math.max(0, w.getBoundingClientRect().top - rd.getBoundingClientRect().top + rd.scrollTop - this.inset()); }finally{ setTimeout(() => { this.suspend = Math.max(0, this.suspend - 1); }, 60); }
+        this.updateProgressUI();
+      };
+      if (pg > 1){ goPg(); requestAnimationFrame(goPg); setTimeout(goPg, 220); setTimeout(goPg, 700); }
+      return 0;
+    }
     const p = meta && meta.progress > 0 && meta.progress < Reader.words.length ? meta.progress : 0;
     this.pos = p; this.lastPos = p;
     const go = () => { if (p > 0) this.goToWord(p, { noAudio:true }); else this.update(true); this.updateProgressUI(); };
@@ -507,7 +525,7 @@ const Reading = {
   tick(){
     const now = Date.now();
     // only count while this very book is open on screen (stats are loaded per book: see statId)
-    if (!document.body.classList.contains("reading") || document.hidden || !Reader.words.length || this.statId !== UI.activeId || UI.activeId == null){ this.lastTick = now; return; }
+    if (!document.body.classList.contains("reading") || document.hidden || !(Reader.words.length || this.imageOnly()) || this.statId !== UI.activeId || UI.activeId == null){ this.lastTick = now; return; }
     const dt = Math.max(0, Math.min(10, Math.round((now - this.lastTick) / 1000)));
     const active = (now - this.lastActive < 150000) || Speech.playing || this._auto;   // 2.5 min without touching = you stopped (a page can take a while to read)
     if (active && dt){ this.readSecs += dt; this._dayAdd(dt, this.sessWords); this.sessWords = 0; }
@@ -517,7 +535,7 @@ const Reading = {
   _day:null,
   _dayAdd(secs, words){ if (!this._day) this._day = { s:0, w:0 }; this._day.s += secs; this._day.w += words; },
   async flush(){
-    if (UI.activeId != null && this.statId === UI.activeId && Reader.words.length){
+    if (UI.activeId != null && this.statId === UI.activeId && (Reader.words.length || this.imageOnly())){
       try{ await DB.setMeta(this.statId, { readSecs:this.readSecs, readWords:this.readWords }); }catch(e){}
     }
     if (this._day && (this._day.s || this._day.w)){
