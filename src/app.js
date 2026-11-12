@@ -3120,6 +3120,7 @@ else $("#voiceSel").innerHTML="<option>No TTS available</option>";
 setInterval(()=>{ if(Speech.playing&&speechSynthesis.speaking&&!speechSynthesis.paused){ speechSynthesis.pause(); speechSynthesis.resume(); } },12000);
 /*__READING_JS__*/
 Shelf.show(false);
+window.addEventListener("pagehide",()=>{ try{ saveProgress(true); }catch(e){} });
 
 window.__LoudReader = { UI, Backup, GSearch, Dict, Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
 } /* end appInit */
@@ -3127,4 +3128,3 @@ window.__LoudReader = { UI, Backup, GSearch, Dict, Theme, Pager, Reading, Settin
 </body>
 </html>
 
-window.addEventListener("pagehide",()=>{ try{ saveProgress(true); }catch(e){} });
