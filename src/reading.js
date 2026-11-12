@@ -97,7 +97,13 @@ const Reading = {
   },
   /* comics and scanned PDFs without any text words: progress is a page number, not a word index */
   imageOnly(){ return Reader.mode === "pdf" && !Reader.words.length && (Reader.totalPages || 0) > 0; },
+  goToImgPage(pg){
+    const rd = this.rd(), w = Reader.pageWrappers[pg]; if (!w) return;
+    this.suspend++;
+    try{ rd.scrollTop = Math.max(0, w.getBoundingClientRect().top - rd.getBoundingClientRect().top + rd.scrollTop - this.inset()); }finally{ setTimeout(() => { this.suspend = Math.max(0, this.suspend - 1); }, 60); }
+  },
   pageNow(){
+    if (Pager.on) return clamp(Pager.idx + 1, 1, Reader.totalPages || 1);
     const w1 = Reader.pageWrappers[1]; if (!w1) return 1;
     return clamp(this._firstPageBelow(this.topLine()), 1, Reader.totalPages || 1);
   },
@@ -342,19 +348,15 @@ const Reading = {
 
   /* --- restore on open --- */
   restore(meta){
-    const willPage = !!RS.flip && Reader.words.length > 0 && !(typeof Ink !== "undefined" && Ink.active);
+    const willPage = !!RS.flip && (Reader.words.length > 0 || this.imageOnly()) && !(typeof Ink !== "undefined" && Ink.active);
     const rd = this.rd(); if (!willPage){ rd.scrollTop = 0; rd.scrollLeft = 0; }
     this.chapters = null; this.chapIdx = -1; this.anchor = null;
     this.readSecs = (meta && meta.readSecs) || 0; this.readWords = (meta && meta.readWords) || 0; this.sessWords = 0; this.statId = UI.activeId; this.lastTick = Date.now();
     this.clearSearch(); this.bookmarks = (meta && meta.bookmarks) || []; this.marksLoadedFor = UI.activeId;
     if (this.imageOnly()){
-      const pg = meta && meta.page > 1 ? Math.min(meta.page, Reader.totalPages) : 1; this.pos = 0; this.lastPos = 0;
-      const goPg = () => {
-        const w = Reader.pageWrappers[pg]; if (!w) return;
-        this.suspend++;
-        try{ rd.scrollTop = Math.max(0, w.getBoundingClientRect().top - rd.getBoundingClientRect().top + rd.scrollTop - this.inset()); }finally{ setTimeout(() => { this.suspend = Math.max(0, this.suspend - 1); }, 60); }
-        this.updateProgressUI();
-      };
+      const pg = meta && meta.page > 1 ? Math.min(meta.page, Reader.totalPages) : 1; this.pos = 0; this.lastPos = 0; this._imgPage = pg;
+      if (willPage){ this._justRestored = true; return 0; }   // the pager opens on _imgPage itself
+      const goPg = () => { this.goToImgPage(pg); this.updateProgressUI(); };
       if (pg > 1){ goPg(); requestAnimationFrame(goPg); setTimeout(goPg, 220); setTimeout(goPg, 700); }
       return 0;
     }

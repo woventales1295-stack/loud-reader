@@ -2195,7 +2195,7 @@ function closeCurrentDoc(){
   Reader.render([]); $("#content").innerHTML=WELCOME_HTML;
   $("#welcomeAdd").onclick=()=>$("#fileInput").click();
   $("#docTitle").textContent="No document open"; setStatus("Add a book to begin."); if(typeof Reading!=="undefined"){ Reading.syncChrome(); showDock(false); }
-  UI.enableControls(false); hideOcrBar(); updatePageNav(); updateViewModeBtn(false,"text");
+  UI.enableControls(false); hideOcrBar(true); updatePageNav(); updateViewModeBtn(false,"text");
   if(!Shelf.visible) Shelf.show(false);
 }
 
@@ -2266,7 +2266,7 @@ async function openDoc(id){
   try{ await Reading.flush(); }catch(e){}
   const doc=await DB.getDoc(id); if(!doc) return;
   UI.activeId=id; Shelf.hide();
-  hideOcrBar();
+  hideOcrBar(true);
   $("#docTitle").textContent=doc.name;
   $("#content").innerHTML='<div class="welcome"><h1>⏳</h1><p>Preparing this document…</p></div>';
   setStatus("Reading "+doc.name+" …"); UI.enableControls(false);
@@ -2394,10 +2394,12 @@ function showOcrBar(doc, reason){
   if (reason==="garbled") $("#ocrLangOrder").value="hin+eng";
   if (reason==="comic") $("#ocrLangOrder").value="eng+hin";
   $("#ocrProg").hidden=true; $("#ocrCancel").hidden=true; $("#ocrRun").hidden=false; $("#ocrRun").disabled=false; $("#ocrDismiss").hidden=false; $("#ocrLangOrder").hidden=false;
-  $("#ocrBar").classList.add("show");
+  // the banner no longer pops up on its own: "Run OCR" lives in the ⋮ menu and opens it on demand
 }
-function hideOcrBar(){ $("#ocrBar").classList.remove("show"); ocrDocRef=null; }
+function revealOcrBar(){ if(ocrDocRef) $("#ocrBar").classList.add("show"); }
+function hideOcrBar(clear){ $("#ocrBar").classList.remove("show"); if(clear) ocrDocRef=null; }
 $("#ocrDismiss").onclick=hideOcrBar;
+$("#ocrMenuBtn").onclick=()=>{ closeMoreMenu(); revealOcrBar(); };
 $("#ocrCancel").onclick=()=>{ OCR.cancel=true; $("#ocrCancel").disabled=true; $("#ocrMsg").textContent="Cancelling…"; };
 $("#ocrRun").onclick=async()=>{
   if(!ocrDocRef) return; const doc=ocrDocRef; Speech.stop();
@@ -2415,7 +2417,7 @@ $("#ocrRun").onclick=async()=>{
     if(!blocks.length){ $("#ocrMsg").textContent="OCR found no readable text on these pages."; $("#ocrCancel").hidden=true; $("#ocrDismiss").hidden=false; return; }
     doc.ocrText=blocks; doc._ctx={pages:result.pages};
     const stored=await DB.getDoc(doc.id); stored.ocrText=blocks; stored._ctx=doc._ctx; await DB.putDoc(stored);
-    hideOcrBar(); finishOpen(stored,blocks,true); UI.refreshLibrary();
+    hideOcrBar(true); finishOpen(stored,blocks,true); UI.refreshLibrary();
   }catch(err){ console.error(err);
     $("#ocrMsg").textContent="OCR failed: "+(err.message||err);
     $("#ocrCancel").hidden=true; $("#ocrDismiss").hidden=false; $("#ocrRun").hidden=false; $("#ocrRun").disabled=false;
@@ -2441,6 +2443,14 @@ function goToPage(){
 }
 $("#pageGoBtn").onclick=goToPage;
 async function goToPageDialog(){
+  if(UI.activeId!=null && Reading.imageOnly()){
+    const total=Reader.totalPages||1, cur=Reading.pageNow();
+    const r=await dlg({title:"Go to page",msg:"You are on page "+cur+" of "+total+". Type a page number.",input:{value:"",placeholder:"1 – "+total},ok:"Go"});
+    if(!r||!r.ok) return; const k=parseInt(String(r.value||"").trim(),10); if(!Number.isFinite(k)){ toast("Enter a page number"); return; }
+    const pg=clamp(k,1,total); if(k>total) toast("Last page is "+total);
+    if(Pager.on) Pager.goto(pg-1,false); else Reading.goToImgPage(pg);
+    return;
+  }
   const n=Reader.words.length; if(UI.activeId==null || !n) return;
   const pos=Reading.pos||0; let cur, total, approx=false, mode;
   if(Reader.mode==="pdf" || (!Pager.on && Reader.totalPages>1)){
@@ -2502,8 +2512,9 @@ function openMoreMenu(){
   const r=btn.getBoundingClientRect();
   menu.style.top=(r.bottom+8)+"px";
   menu.style.right=(window.innerWidth-r.right)+"px";
-  const inDoc=UI.activeId!=null && !Shelf.visible && Reader.words.length>0;
-  menu.querySelectorAll("[data-needdoc]").forEach(b=>{ b.hidden=!inDoc; });
+  const inDoc=UI.activeId!=null && !Shelf.visible && (Reader.words.length>0 || Reading.imageOnly());
+  $("#ocrMenuBtn").hidden = !(UI.activeId!=null && !Shelf.visible && ocrDocRef && ocrDocRef.id===UI.activeId && !$("#ocrBar").classList.contains("show"));
+  menu.querySelectorAll("[data-needdoc]").forEach(b=>{ b.hidden=!inDoc || (Reading.imageOnly() && (b.id==="saveTextBtn"||b.id==="searchMenuBtn")); });
   menu.hidden=false;
 }
 function closeMoreMenu(){ $("#moreMenu").hidden=true; }

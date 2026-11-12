@@ -14,7 +14,7 @@ const Pager = {
 
   /* ---------- enable / disable ---------- */
   want(){
-    return !!RS.flip && UI.activeId != null && Reader.words.length > 0 && !(typeof Ink !== "undefined" && Ink.active);
+    return !!RS.flip && UI.activeId != null && (Reader.words.length > 0 || Reading.imageOnly()) && !(typeof Ink !== "undefined" && Ink.active);
   },
   sync(){
     const want = this.want(); this.label();
@@ -24,14 +24,16 @@ const Pager = {
   },
   enable(){
     if (this.on) return;
-    if (!Reading._justRestored){ try{ Reading.update(true); }catch(e){} }
+    const io = Reading.imageOnly();
+    if (io && !Reading._justRestored) Reading._imgPage = Reading.pageNow();
+    if (!Reading._justRestored && !io){ try{ Reading.update(true); }catch(e){} }
     Reading._justRestored = false;
     const pos = Reading.pos || 0;
     Reading.stopAuto && Reading.stopAuto(true);
     this.on = true; this.mode = Reader.mode; this.wordsRef = Reader.words; this.z = 1;
     this.layout(pos);
     const rd = this.rd(); rd.scrollTop = 0; rd.scrollLeft = 0;
-    this.idx = pos <= 0 ? 0 : clamp(this.pageOfWord(pos), 0, this.count - 1);   // a fresh book opens on its very first page (a cover picture has no words)
+    this.idx = io ? clamp((Reading._imgPage || 1) - 1, 0, this.count - 1) : pos <= 0 ? 0 : clamp(this.pageOfWord(pos), 0, this.count - 1);   // a fresh book opens on its very first page (a cover picture has no words)
     this.place(false);
     Reading.setChrome(false);
     Reading.pos = this.firstWord(this.idx) || pos;
@@ -51,6 +53,7 @@ const Pager = {
     ["width", "height", "marginLeft", "marginTop", "columnWidth", "columnGap", "transform", "transition", "display", "alignItems"].forEach(k => st[k] = "");
     c.style.removeProperty("--pgW"); c.style.removeProperty("--flipw");
     Object.keys(Reader.pageWrappers || {}).forEach(k => { const w = Reader.pageWrappers[k]; w.style.width = ""; w.style.margin = ""; w.style.height = ""; if (w.dataset.pt != null) w.style.paddingTop = w.dataset.pt; delete w.dataset.rw; });
+    if (Reading.imageOnly()){ const pg = this.idx + 1; Reading._imgPage = pg; if (!keepPos){ const go = () => Reading.goToImgPage(pg); go(); requestAnimationFrame(go); setTimeout(go, 200); } return; }
     if (!keepPos) setTimeout(() => { Reading.goToWord(pos, { noAudio:true }); }, 0);
   },
 
