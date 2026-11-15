@@ -265,7 +265,7 @@ const Pager = {
     n.hidden = !this.on || Shelf.visible; if (this.on) n.textContent = (this.idx + 1) + " / " + this.count;
   },
   afterMove(){
-    if (this.mode === "text"){ clearTimeout(this._wuT); this._wuT = setTimeout(() => { this.windowUpdate(); this.refine(); }, 30); return; }
+    if (this.mode === "text"){ clearTimeout(this._wuT); this._wuT = setTimeout(() => { this.windowUpdate(); this.refine(); }, 30); if (!this._prT) this._prT = setTimeout(() => { this._prT = 0; try{ Reader.prune(); }catch(e){} }, 900); return; }
     // make sure the neighbours are painted before they slide in
     if (this.mode === "pdf"){
       [this.idx, this.idx + 1, this.idx - 1].forEach(k => {

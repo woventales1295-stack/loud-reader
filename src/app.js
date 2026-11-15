@@ -538,7 +538,7 @@ async function parseEPUB(blob, onProgress, ctx){
   const items={}; opf.querySelectorAll("manifest > item").forEach(i=>items[i.getAttribute("id")]={ href:i.getAttribute("href"), type:i.getAttribute("media-type")||"", props:i.getAttribute("properties")||"" });
   const spine=[...opf.querySelectorAll("spine > itemref")].map(i=>i.getAttribute("idref"));
   const getFile=(path)=>zip.file(path)||zip.file(path.replace(/^\.?\//,""));
-  const blocks=[], fileStart={}, anchors={};
+  const blocks=[], fileStart={}, anchors={}, cssCache={};
   let n=0;
   for (const idref of spine){
     n++; if(onProgress) onProgress(n/spine.length);
@@ -546,8 +546,12 @@ async function parseEPUB(blob, onProgress, ctx){
     const path=zipPath(opfPath, it.href);
     const f=getFile(path); if(!f) continue;
     const base=blocks.length; fileStart[path]=base;
-    const part=htmlToBlocks(await f.async("string"), {
-      epub:true,
+    const htmlStr=await f.async("string");
+    let css=""; const lre=/<link\b[^>]*>/gi; let lm;
+    while((lm=lre.exec(htmlStr))){ const tag=lm[0]; if(!/stylesheet/i.test(tag)) continue; const hm=/href\s*=\s*["']([^"']+)["']/i.exec(tag); if(!hm) continue;
+      const cp=zipPath(path, hm[1].split("#")[0]); if(!(cp in cssCache)){ const cf=getFile(cp); cssCache[cp]=cf ? await cf.async("string") : ""; } css+="\n"+cssCache[cp]; }
+    const part=htmlToBlocks(htmlStr, {
+      epub:true, css,
       resolveImg:(src)=>zipPath(path, src),
       onAnchor:(id,local)=>{ if(!(path+"#"+id in anchors)) anchors[path+"#"+id]=base+local; }
     });
@@ -606,9 +610,47 @@ async function parseEPUB(blob, onProgress, ctx){
      markers (epub:type="noteref"/"footnote", role="doc-noteref"/"doc-footnote")
      where publishers use them -- this is best-effort, since plenty of EPUBs mark
      footnotes with nothing more than an arbitrary class name or none at all. */
+/* ---- inline formatting (italic, bold, underline, strike, sup, sub, code): bit flags per word ---- */
+const FMT_TAG={EM:1,I:1,CITE:1,DFN:1,VAR:1,STRONG:2,B:2,U:4,INS:4,S:8,STRIKE:8,DEL:8,SUP:16,SUB:32,CODE:64,TT:64,KBD:64,SAMP:64};
+function declFmt(txt){
+  let s=0,c=0; const m=String(txt||"").toLowerCase();
+  m.split(";").forEach(d=>{
+    const i=d.indexOf(":"); if(i<0) return; const k=d.slice(0,i).trim(), v=d.slice(i+1).replace(/!important/g,"").trim();
+    if(k==="font-style"){ if(/italic|oblique/.test(v)) s|=1; else if(v==="normal") c|=1; }
+    else if(k==="font-weight"){ if(/^(bold|bolder|[6-9]00)$/.test(v)) s|=2; else if(/^(normal|lighter|[1-5]00)$/.test(v)) c|=2; }
+    else if(k==="text-decoration"||k==="text-decoration-line"){ if(/underline/.test(v)) s|=4; if(/line-through/.test(v)) s|=8; if(v==="none") c|=12; }
+    else if(k==="vertical-align"){ if(v==="super") s|=16; else if(v==="sub") s|=32; else if(v==="baseline") c|=48; }
+  });
+  return {s,c};
+}
+const _cssFmtCache=new Map();
+function parseCssFmt(css){
+  if(!css) return null; let r=_cssFmtCache.get(css); if(r) return r;
+  r={tag:{},cls:{},tcls:{}};
+  const txt=css.replace(/\/\*[\s\S]*?\*\//g,"").replace(/@[a-z-]+[^{;]*;/gi,"");
+  const re=/([^{}]+)\{([^{}]*)\}/g; let m;
+  while((m=re.exec(txt))){
+    const d=declFmt(m[2]); if(!d.s && !d.c) continue;
+    m[1].split(",").forEach(sel=>{
+      sel=sel.trim().toLowerCase(); const mm=/^([a-z][a-z0-9]*)?(?:\.([\w-]+))?$/.exec(sel); if(!mm||(!mm[1]&&!mm[2])) return;
+      const put=(o,k)=>{ const e=o[k]||(o[k]={s:0,c:0}); e.s=(e.s&~d.c)|d.s; e.c=(e.c&~d.s)|d.c; };
+      if(mm[1]&&mm[2]) put(r.tcls,mm[1]+"."+mm[2]); else if(mm[2]) put(r.cls,mm[2]); else put(r.tag,mm[1]);
+    });
+  }
+  if(_cssFmtCache.size>40) _cssFmtCache.clear();
+  _cssFmtCache.set(css,r); return r;
+}
 function htmlToBlocks(html, opts){
   opts = opts || {};
   const doc = (typeof html==="string") ? new DOMParser().parseFromString(html,"text/html") : html; // string or an already-parsed Document (MOBI sections)
+  let cssText=opts.css||""; doc.querySelectorAll("style").forEach(st=>{ cssText+="\n"+st.textContent; });
+  const CF=parseCssFmt(cssText);
+  const fmtOf=(el,f)=>{
+    let set=FMT_TAG[el.tagName]||0, clr=0; const add=(r)=>{ if(!r) return; set=(set&~r.c)|r.s; clr=(clr&~r.s)|r.c; };
+    if(CF){ const tg=el.tagName.toLowerCase(); add(CF.tag[tg]); const cl=el.getAttribute("class"); if(cl) cl.split(/\s+/).forEach(c=>{ if(c){ add(CF.cls[c]); add(CF.tcls[tg+"."+c]); } }); }
+    const st=el.getAttribute("style"); if(st) add(declFmt(st));
+    return (f & ~clr) | set;
+  };
   doc.querySelectorAll("script,style,head").forEach(n=>n.remove());
 
   // Strip inline footnote/endnote reference markers so a bare "1" isn't read
@@ -656,17 +698,49 @@ function htmlToBlocks(html, opts){
     return inherit;
   };
   const blocks=[];
-  function walk(n, kind){
-    let run=[];
+  function walk(n, kind, fl){
+    fl=fl||0; let run=[];
+    const runText=()=>{ let t=""; for(const g of run) t+=g.t; return t; };
     const flush=()=>{
-      const t=run.join("").replace(/\s+/g," ").trim(); run=[];
+      const segs=run; run=[];
+      let plain=true; for(const g of segs){ if(g.f){ plain=false; break; } }
+      let t, fr=null;
+      if (plain){ t=""; for(const g of segs) t+=g.t; t=t.replace(/\s+/g," ").trim(); }
+      else{
+        let out="", mk=[], prev=true;
+        for(const g of segs){ const x=g.t; for(let i=0;i<x.length;i++){ const ch=x.charCodeAt(i); const sp=(ch===32||ch===10||ch===9||ch===13||ch===12||ch===160||ch===0x2009||ch===0x200a||ch===0x2003||ch===0x2002);
+          if(sp){ if(!prev){ out+=" "; mk.push(g.f); prev=true; } } else { out+=x[i]; mk.push(g.f); prev=false; } } }
+        if(out.endsWith(" ")){ out=out.slice(0,-1); mk.pop(); }
+        t=out;
+        if (t){   // per-word flag = the formatting most of its letters carry
+          fr=[]; let pos=0, tk=0, runS=-1, runF=0;
+          const parts=t.split(" ");
+          for(const w of parts){
+            let best=0, cnt={}, bc=-1;
+            for(let i=0;i<w.length;i++){ const f=mk[pos+i]; cnt[f]=(cnt[f]||0)+1; if(cnt[f]>bc){ bc=cnt[f]; best=f; } }
+            pos+=w.length+1;
+            if(best!==runF){ if(runF) fr.push([runS,tk,runF]); runS=tk; runF=best; }
+            tk++;
+          }
+          if(runF) fr.push([runS,tk,runF]);
+          if(!fr.length) fr=null;
+        }
+      }
       if (!t) return;
       const blk={ text:t, role: isFootnoteNode(n) ? "footnote" : "body" };
       if (kind) blk.kind=kind;
+      if (fr) blk.fl=fr;
       blocks.push(blk);
     };
+    const inl=(c,f)=>{
+      const f2=fmtOf(c,f);
+      c.childNodes.forEach(x=>{
+        if (x.nodeType===3) run.push({t:x.nodeValue,f:f2});
+        else if (x.nodeType===1){ if (x.tagName==="BR") run.push({t:" ",f:f2}); else inl(x,f2); }
+      });
+    };
     n.childNodes.forEach(c=>{
-      if (c.nodeType===3){ run.push(c.nodeValue); return; }
+      if (c.nodeType===3){ run.push({t:c.nodeValue,f:fl}); return; }
       if (c.nodeType!==1) return;
       const tag=c.tagName;
       if (c.id && opts.onAnchor){ if (BLOCK.has(tag)) flush(); opts.onAnchor(c.id, blocks.length); }
@@ -684,16 +758,16 @@ function htmlToBlocks(html, opts){
       if (tag==="BR"){
         // a <br> mid-sentence (hard-wrapped lines from converted books) is just a space;
         // after a finished sentence, a short line (verse) or a doubled <br> it ends the paragraph
-        const cur=run.join("").replace(/\s+/g," ").trim();
-        if (!cur || cur.length<45 || /[.!?\u2026:;"\u201d\u2019)\]]$/.test(cur) || (c.previousSibling && c.previousSibling.nodeName==="BR")) flush(); else run.push(" ");
+        const cur=runText().replace(/\s+/g," ").trim();
+        if (!cur || cur.length<45 || /[.!?\u2026:;"\u201d\u2019)\]]$/.test(cur) || (c.previousSibling && c.previousSibling.nodeName==="BR")) flush(); else run.push({t:" ",f:fl});
         return;
       }
-      if (BLOCK.has(tag) || (c.querySelector && c.querySelector(BLOCK_SEL+",img,svg"))){ flush(); walk(c, kindFor(tag, kind)); }
-      else run.push(c.textContent);
+      if (BLOCK.has(tag) || (c.querySelector && c.querySelector(BLOCK_SEL+",img,svg"))){ flush(); walk(c, kindFor(tag, kind), fmtOf(c, fl)); }
+      else inl(c, fl);
     });
     flush();
   }
-  if (doc.body) walk(doc.body, undefined);
+  if (doc.body) walk(doc.body, undefined, fmtOf(doc.body,0));
   if (!blocks.length){ const t=(doc.body?doc.body.textContent:"").replace(/\s+/g," ").trim(); if(t) blocks.push({text:t, role:"body"}); }
   return blocks;
 }
@@ -1124,6 +1198,7 @@ const OCR = {
 };
 
 /* ---------- reader model ---------- */
+function fmtCls(f){ return (f&1?" fi":"")+(f&2?" fb":"")+(f&4?" fu":"")+(f&8?" fs":"")+(f&16?" fsup":"")+(f&32?" fsub":"")+(f&64?" fc":""); }
 class TextWord{
   constructor(text, skip, bi){ this.text=text; this.skip=skip; this.b=bi; this._s=null; }
   get span(){ const B=Reader.blocks[this.b]; if(B && !B.done) Reader._mat(B); return this._s; }
@@ -1137,13 +1212,49 @@ const Reader = {
   // So paragraphs start as ONE text node; a paragraph's per-word <span>s are created the
   // first time anything asks a word for its .span (the getter below) or when it scrolls
   // near the screen. Span metrics are identical to plain text, so layout never shifts.
+  // paragraph as plain text (one text node, or a few for formatted runs): the cheap resting state
+  _plain(B, toks){
+    const p=B.p; if(!toks){ toks=[]; for(let k=0;k<B.n;k++) toks.push(this.words[B.first+k].text); }
+    p.textContent=""; B.tn=null;
+    if (!B.f){ p.textContent=toks.join(" "); return; }
+    const f=B.f; B.tn=[]; let acc=0, k=0;
+    const addT=(txt)=>{ const n=document.createTextNode(txt); p.appendChild(n); B.tn.push({n, s:acc}); acc+=txt.length; };
+    while(k<toks.length){
+      let e=k+1; while(e<toks.length && f[e]===f[k]) e++;
+      const seg=toks.slice(k,e).join(" ");
+      if (k>0) addT(" ");
+      if (f[k]){ const sp=el("span",fmtCls(f[k]).trim()); const n=document.createTextNode(seg); sp.appendChild(n); p.appendChild(sp); B.tn.push({n, s:acc}); acc+=seg.length; }
+      else addT(seg);
+      k=e;
+    }
+  },
+  // go back to the resting state (drops the per-word spans); long sessions otherwise pile up tens of thousands of nodes
+  _unmat(B){
+    if (!B.done) return; B.done=false;
+    for (let k=0;k<B.n;k++){ const w=this.words[B.first+k]; if (w) w._s=null; }
+    this._plain(B);
+    if (this._mio && !(typeof Pager!=="undefined" && Pager.on)) this._mio.observe(B.p);
+  },
+  prune(){
+    const L=this._matList; if(!L || L.length<70) return;
+    const paged=typeof Pager!=="undefined" && Pager.on, W=window.innerWidth, H=window.innerHeight;
+    const keep=[]; let drop=0; const limit=L.length-40;
+    for (let i=0;i<L.length;i++){
+      const B=L[i]; if(!B.done) continue;
+      if (i>=limit){ keep.push(B); continue; }
+      const p=B.p; let busy = !p.isConnected || p.querySelector('[class*="hl-"],.note-icon,.speaking,.sel-preview,.searchhit');
+      if (!busy){ const r=p.getBoundingClientRect(); busy = paged ? (r.right>-2.5*W && r.left<3.5*W) : (r.bottom>-2*H && r.top<3*H); }
+      if (busy) keep.push(B); else { this._unmat(B); drop++; }
+    }
+    this._matList=keep; return drop;
+  },
   _mat(B){
-    if (B.done) return; B.done=true;
+    if (B.done) return; B.done=true; (this._matList||(this._matList=[])).push(B);
     const p=B.p, words=this.words; p.textContent="";
     const frag=document.createDocumentFragment();
     for (let k=0;k<B.n;k++){
       if (k>0) frag.appendChild(document.createTextNode(" "));
-      const w=words[B.first+k]; const span=el("span","w"); span.textContent=w.text; span.dataset.i=B.first+k; w._s=span; frag.appendChild(span);
+      const w=words[B.first+k]; const span=el("span","w"+(B.f?fmtCls(B.f[k]):"")); span.textContent=w.text; span.dataset.i=B.first+k; w._s=span; frag.appendChild(span);
     }
     p.appendChild(frag);
     if (this._mio) this._mio.unobserve(p);
@@ -1157,8 +1268,9 @@ const Reader = {
     const B=this.blocks[w.b]; if(!B) return 0;
     if(B.done){ const s=w._s; return s ? s.getBoundingClientRect().left-c : 0; }
     if(!B.offs){ const o=new Int32Array(B.n); let acc=0; for(let k=0;k<B.n;k++){ o[k]=acc; acc+=this.words[B.first+k].text.length+1; } B.offs=o; }
-    const tn=B.p.firstChild; if(!tn) return 0;
-    const k=i-B.first, off=B.offs[k], len=w.text.length;
+    let tn=B.p.firstChild; if(!tn) return 0;
+    const k=i-B.first; let off=B.offs[k]; const len=w.text.length;
+    if(B.tn){ for(const t of B.tn){ if(off>=t.s && off<t.s+t.n.length){ tn=t.n; off-=t.s; break; } } }
     const r=document.createRange(); try{ r.setStart(tn,off); r.setEnd(tn,Math.min(off+len, tn.length)); }catch(e){ return 0; }
     const rc=r.getClientRects()[0]||r.getBoundingClientRect();
     return rc.left-c;
@@ -1193,7 +1305,7 @@ const Reader = {
     opts = opts || {};
     if (this._mio){ this._mio.disconnect(); this._mio=null; }
     const content=$("#content"); content.innerHTML="";
-    this.words=[]; this.sentStart=[]; this.sentEnd=[]; this.starts=[]; this.blocks=[]; this.blockWord=[];
+    this.words=[]; this.sentStart=[]; this.sentEnd=[]; this.starts=[]; this.blocks=[]; this.blockWord=[]; this._matList=[];
     this.pageStartWord={}; this.totalPages=0; this.bodyWordCount=0;
     if (this._iio){ this._iio.disconnect(); this._iio=null; }
     this._iio = new IntersectionObserver((entries)=>{
@@ -1227,7 +1339,11 @@ const Reader = {
       const skip = role!=="body";
       for (let k=0;k<toks.length;k++) this.words.push(new TextWord(toks[k], skip, bk));
       if (!skip) this.bodyWordCount+=toks.length;
-      p.textContent=toks.join(" ");
+      if (Array.isArray(b.fl) && b.fl.length){   // formatted paragraph: italic/bold runs are real elements from the start, so they show even before word spans exist
+        const f=new Uint8Array(toks.length); b.fl.forEach(r=>{ for(let q=r[0];q<r[1]&&q<f.length;q++) f[q]=r[2]; });
+        B.f=f;
+      }
+      this._plain(B, toks);
       this.words[this.words.length-1].blockEnd=true;
       frag.appendChild(p);
     });
@@ -2260,7 +2376,7 @@ async function importFolder(fileList){
 }
 
 let parseToken=0;
-const PARSE_V=2;
+const PARSE_V=3;
 async function openDoc(id){
   const token=++parseToken; Speech.stop();
   try{ await Reading.flush(); }catch(e){}

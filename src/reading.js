@@ -566,6 +566,7 @@ $("#reader").addEventListener("scroll", () => {
     _scrRAF = 0; const rd = $("#reader"), st = rd.scrollTop;
     // hide the bars when the reader scrolls down on their own (like a book: out of the way)
     if (Reading.userTouching && st > Reading.lastScrollTop + 14 && document.body.classList.contains("reading") && !Reading.chromeHidden()) Reading.setChrome(false);
+    if (!Reading._prT) Reading._prT = setTimeout(() => { Reading._prT = 0; try{ Reader.prune(); }catch(e){} }, 1500);
     Reading.lastScrollTop = st; Reading.update(); if (Annot.selecting && Annot.reposition) Annot.reposition();
   });
 }, { passive:true });
