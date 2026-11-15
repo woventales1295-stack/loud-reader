@@ -370,6 +370,10 @@ const Reading = {
 
   /* --- bookmarks --- */
   visibleRange(){
+    if (Pager.on && Pager.mode === "text" && Pager.count){   // paged: the page's word span comes straight from the pager's cached starts, no layout reads
+      const a = Pager.firstWord(Pager.idx), nx = Pager.idx + 1 < Pager.count ? Pager.firstWord(Pager.idx + 1) : Reader.words.length;
+      return [a, Math.max(a, nx - 1)];
+    }
     const a = this.measure(); if (!a) return [0, 0];
     const rd = this.rd().getBoundingClientRect(); let b = a.i;
     if (Reader.mode === "pdf"){
@@ -383,6 +387,7 @@ const Reading = {
     return [a.i, b];
   },
   bookmarkHere(){
+    if (!this.bookmarks || !this.bookmarks.length) return null;
     const [a, b] = this.visibleRange();
     return this.bookmarks.find(m => m.i >= a && m.i <= b) || null;
   },

@@ -137,7 +137,7 @@ const Pager = {
     while (lo <= hi){ const mid = (lo + hi) >> 1; if (ch[mid]._start <= idx){ ans = mid; lo = mid + 1; } else hi = mid - 1; }
     return ans;
   },
-  recomputeStarts(){ let s = 0; this.chunks.forEach(ch => { ch._start = s; s += ch._pages; }); this.count = Math.max(1, s); },
+  recomputeStarts(){ this._fwC = null; let s = 0; this.chunks.forEach(ch => { ch._start = s; s += ch._pages; }); this.count = Math.max(1, s); },
   // exact page count of one chunk (needs layout, so it is made visible while measured)
   measure(k){
     const ch = this.chunks[k], el = ch.el, wc = this._wc, gap = this._gap;
@@ -227,6 +227,12 @@ const Pager = {
   },
   firstWord(idx){
     if (this.mode === "pdf") return Reader.wordIndexForPage(idx + 1) || 0;
+    const fc = this._fwC || (this._fwC = { for:null, m:new Map() });
+    if (fc.for !== this.chunks || fc.W !== this.W){ fc.for = this.chunks; fc.W = this.W; fc.m.clear(); }
+    if (fc.m.has(idx)) return fc.m.get(idx);
+    const r = this._firstWord(idx); if (this.chunks && this.chunks[this.chunkAt(idx)] && this.chunks[this.chunkAt(idx)]._measured) fc.m.set(idx, r); return r;
+  },
+  _firstWord(idx){
     const k = this.chunkAt(idx); this.ensure(k, true);
     const ch = this.chunks[k]; let lo = ch.w0, hi = Math.max(ch.w0, ch.w1), ans = Math.max(ch.w0, ch.w1);
     while (lo <= hi){
@@ -265,7 +271,7 @@ const Pager = {
     n.hidden = !this.on || Shelf.visible; if (this.on) n.textContent = (this.idx + 1) + " / " + this.count;
   },
   afterMove(){
-    if (this.mode === "text"){ clearTimeout(this._wuT); this._wuT = setTimeout(() => { this.windowUpdate(); this.refine(); }, 30); if (!this._prT) this._prT = setTimeout(() => { this._prT = 0; try{ Reader.prune(); }catch(e){} }, 900); return; }
+    if (this.mode === "text"){ clearTimeout(this._wuT); this._wuT = setTimeout(() => { this.windowUpdate(); this.refine(); }, 30); if (!this._prT) this._prT = setTimeout(() => { this._prT = 0; const run = () => { try{ if (!this._moving) Reader.prune(); }catch(e){} }; if (window.requestIdleCallback) requestIdleCallback(run, { timeout:1500 }); else run(); }, 900); return; }
     // make sure the neighbours are painted before they slide in
     if (this.mode === "pdf"){
       [this.idx, this.idx + 1, this.idx - 1].forEach(k => {
