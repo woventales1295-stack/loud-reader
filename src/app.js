@@ -128,6 +128,24 @@ const Native = {
     const uri=AndroidBridge.finishSave();
     return uri ? {ok:true, uri} : {ok:false};
   },
+  // Streaming writer for big files: write(Uint8Array) as often as needed, close() once. Only ~192 KB is ever buffered.
+  async openWriter(name, mime){
+    if(!this.has){
+      const parts=[]; return { async write(u8){ parts.push(u8.slice ? u8.slice() : new Uint8Array(u8)); }, async close(){ const blob=new Blob(parts,{type:mime}); this.blob=blob; const a=el("a"); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },2000); return {ok:true, uri:null}; } };
+    }
+    if(!AndroidBridge.beginSave(name, mime)) return null;
+    const CH=3*65536, buf=new Uint8Array(CH); let fill=0, failed=false;
+    const send=async(u8)=>{
+      const b64=await new Promise((res,rej)=>{ const fr=new FileReader(); fr.onload=()=>res(String(fr.result).split(",")[1]||""); fr.onerror=()=>rej(fr.error); fr.readAsDataURL(new Blob([u8])); });
+      if(!AndroidBridge.appendChunk(b64)){ failed=true; throw new Error("Writing to storage failed (is the device out of space?)."); }
+    };
+    return {
+      async write(u8){ let o=0; while(o<u8.length){ const n=Math.min(CH-fill,u8.length-o); buf.set(u8.subarray(o,o+n),fill); fill+=n; o+=n; if(fill===CH){ await send(buf); fill=0; } } },
+      async close(){ if(failed){ try{ AndroidBridge.abortSave(); }catch(e){} return {ok:false}; }
+        if(fill){ await send(buf.subarray(0,fill)); fill=0; } const uri=AndroidBridge.finishSave(); return uri?{ok:true,uri}:{ok:false}; },
+      abort(){ try{ AndroidBridge.abortSave(); }catch(e){} }
+    };
+  },
   open(uri, mime){ try{ return this.has && AndroidBridge.openUri(uri, mime); }catch(e){ return false; } },
   // Lets the user import a whole folder (with subfolders) from the device.
   // Resolves to an array of {id,name,path,size} (path includes the picked
@@ -1694,70 +1712,148 @@ const UI = {
 };
 
 /* ---------- backup & restore: everything in one file (books, folders, highlights, notes, ink, settings, reading stats) ---------- */
+/* ---- streaming ZIP (STORE) writer/reader: a library can be many GB, so nothing here may hold more than a small buffer in memory ---- */
+const _crcT=(()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=c&1?0xEDB88320^(c>>>1):c>>>1; t[n]=c>>>0; } return t; })();
+function _crc(c,u8){ for(let i=0;i<u8.length;i++) c=_crcT[(c^u8[i])&255]^(c>>>8); return c; }
+function _dosTime(d){ return { t:(d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1), d:((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate() }; }
+let MAX_PART=1.6*1024*1024*1024;   // each backup file stays well under the 4 GB zip limit; bigger libraries are split into parts
+class ZipOut{
+  constructor(sink){ this.sink=sink; this.off=0; this.ents=[]; this.enc=new TextEncoder(); const x=_dosTime(new Date()); this.dt=x.t; this.dd=x.d; }
+  async _w(u8){ await this.sink.write(u8); this.off+=u8.length; }
+  async _local(name){
+    const nb=this.enc.encode(name), h=new Uint8Array(30+nb.length), v=new DataView(h.buffer);
+    v.setUint32(0,0x04034b50,true); v.setUint16(4,20,true); v.setUint16(6,0x0808,true); v.setUint16(8,0,true);
+    v.setUint16(10,this.dt,true); v.setUint16(12,this.dd,true); v.setUint16(26,nb.length,true); h.set(nb,30);
+    const ent={name:nb, off:this.off, crc:0, size:0}; await this._w(h); return ent;
+  }
+  async _done(ent){
+    ent.crc=(ent.crc^0xFFFFFFFF)>>>0; const d=new Uint8Array(16), v=new DataView(d.buffer);
+    v.setUint32(0,0x08074b50,true); v.setUint32(4,ent.crc,true); v.setUint32(8,ent.size,true); v.setUint32(12,ent.size,true);
+    await this._w(d); this.ents.push(ent);
+  }
+  async addBytes(name,u8){ const e=await this._local(name); e.crc=_crc(0xFFFFFFFF,u8); e.size=u8.length; await this._w(u8); await this._done(e); }
+  async addBlob(name,blob,onBytes){
+    if(blob.size>=0xFFFFFFFF) throw new Error("A single book is larger than 4 GB.");
+    const e=await this._local(name); e.crc=0xFFFFFFFF; const STEP=1024*1024;
+    for(let o=0;o<blob.size;o+=STEP){ const u=new Uint8Array(await blob.slice(o,Math.min(blob.size,o+STEP)).arrayBuffer()); e.crc=_crc(e.crc,u); e.size+=u.length; await this._w(u); if(onBytes) onBytes(u.length); }
+    await this._done(e);
+  }
+  async finish(){
+    const cdOff=this.off; let n=0;
+    for(const e of this.ents){
+      const h=new Uint8Array(46+e.name.length), v=new DataView(h.buffer);
+      v.setUint32(0,0x02014b50,true); v.setUint16(4,20,true); v.setUint16(6,20,true); v.setUint16(8,0x0808,true); v.setUint16(10,0,true);
+      v.setUint16(12,this.dt,true); v.setUint16(14,this.dd,true); v.setUint32(16,e.crc,true); v.setUint32(20,e.size,true); v.setUint32(24,e.size,true);
+      v.setUint16(28,e.name.length,true); v.setUint32(42,e.off,true); h.set(e.name,46); await this._w(h); n++;
+    }
+    const cdSize=this.off-cdOff, t=new Uint8Array(22), v=new DataView(t.buffer);
+    v.setUint32(0,0x06054b50,true); v.setUint16(8,n,true); v.setUint16(10,n,true); v.setUint32(12,cdSize,true); v.setUint32(16,cdOff,true);
+    await this._w(t);
+  }
+}
+async function zipOpen(file){   // reads only the directory at the end; entries are lazy slices of the file
+  const size=file.size, tl=Math.min(size,65557+22); if(size<22) return null;
+  const tail=new Uint8Array(await file.slice(size-tl).arrayBuffer()); let p=tail.length-22;
+  while(p>=0 && !(tail[p]===0x50&&tail[p+1]===0x4b&&tail[p+2]===5&&tail[p+3]===6)) p--;
+  if(p<0) return null;
+  const dv=new DataView(tail.buffer,tail.byteOffset), n=dv.getUint16(p+10,true), cdSize=dv.getUint32(p+12,true), cdOff=dv.getUint32(p+16,true);
+  if(n===0xFFFF||cdOff===0xFFFFFFFF||cdOff+cdSize>size) return null;
+  const cd=new Uint8Array(await file.slice(cdOff,cdOff+cdSize).arrayBuffer()), cv=new DataView(cd.buffer), dec=new TextDecoder(), ents={}; let q=0;
+  for(let i=0;i<n;i++){
+    if(cv.getUint32(q,true)!==0x02014b50) return null;
+    const method=cv.getUint16(q+10,true), csize=cv.getUint32(q+20,true), nl=cv.getUint16(q+28,true), el=cv.getUint16(q+30,true), cl=cv.getUint16(q+32,true), lho=cv.getUint32(q+42,true);
+    ents[dec.decode(cd.subarray(q+46,q+46+nl))]={method,csize,lho}; q+=46+nl+el+cl;
+  }
+  const blob=async(name)=>{
+    const e=ents[name]; if(!e) return null; if(e.method!==0) throw new Error("This backup uses an unsupported compression.");
+    const lh=new DataView(await file.slice(e.lho,e.lho+30).arrayBuffer()); const st=e.lho+30+lh.getUint16(26,true)+lh.getUint16(28,true);
+    return file.slice(st,st+e.csize);
+  };
+  return { has:(n)=>!!ents[n], blob, async text(name){ const b=await blob(name); return b?await b.text():null; } };
+}
 const Backup = {
   FORMAT:"loudreader-backup", VER:1,
   async make(){
-    await ensureZip(); const zip=new JSZip();
-    setStatus("Backing up… collecting data");
-    const ids=(await DB.allDocs()).map(d=>d.id); const docsMeta=[];
+    const ids=(await DB.allDocs()).map(d=>d.id), stamp=(()=>{ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); })();
+    const created=Date.now(), results=[]; let part=0, z=null, sink=null, docs=[], done=0, books=0, bytes=0, total=0;
+    for(const d of await DB.allDocs()) total+=d.size||0;
+    const fname=()=>"LoudReader-backup-"+stamp+(part>1?"-part"+part:"")+".lrbackup";
+    const open=async()=>{ part++; sink=await Native.openWriter(fname(),"application/octet-stream"); if(!sink) throw new Error("Couldn't create the backup file. Check free storage."); z=new ZipOut(sink); docs=[]; };
+    const close=async(first)=>{
+      const data={format:this.FORMAT, version:this.VER, created, part, docs,
+        meta:first?await DB.getAllOf("meta"):[], annotations:first?await DB.getAllOf("annotations"):[], ink:first?await DB.getAllOf("ink"):[]};
+      await z.addBytes("data.json", new TextEncoder().encode(JSON.stringify(data)));
+      await z.finish(); const r=await sink.close(); if(!r||!r.ok) throw new Error("The file couldn't be written. Check free storage."); results.push({name:fname(), size:z.off, uri:r.uri, notes:data.annotations.length});
+    };
+    await open(); let firstPart=true, lastYield=Date.now();
+    try{
     for(let i=0;i<ids.length;i++){
       const d=await DB.getDoc(ids[i]); if(!d) continue;
-      const {blob,...rest}=d; docsMeta.push(rest);
-      if(blob) zip.file("books/"+d.id, blob, {binary:true});
-      setStatus("Backing up… "+(i+1)+" of "+ids.length+" books");
+      const {blob,...rest}=d; const sz=blob?blob.size:0;
+      if(z.off>0 && docs.length && z.off+sz+4096>MAX_PART){ await close(firstPart); firstPart=false; await open(); }
+      docs.push(rest); books++;
+      if(blob) await z.addBlob("books/"+d.id, blob, (n)=>{ bytes+=n; if(Date.now()-lastYield>400){ lastYield=Date.now(); setStatus("Backing up… "+(i+1)+" of "+ids.length+" books · "+Math.round(bytes/1048576)+(total?" of "+Math.round(total/1048576):"")+" MB"); } });
+      setStatus("Backing up… "+(i+1)+" of "+ids.length+" books · "+Math.round(bytes/1048576)+(total?" of "+Math.round(total/1048576):"")+" MB");
       await new Promise(r=>setTimeout(r,0));
     }
-    const data={format:this.FORMAT, version:this.VER, created:Date.now(), docs:docsMeta,
-      meta:await DB.getAllOf("meta"), annotations:await DB.getAllOf("annotations"), ink:await DB.getAllOf("ink")};
-    zip.file("data.json", JSON.stringify(data));
-    const out=await zip.generateAsync({type:"blob", compression:"STORE", streamFiles:true},(m)=>setStatus("Backing up… packing "+Math.round(m.percent)+"%"));
-    return {blob:out, books:docsMeta.length, notes:data.annotations.length};
+    await close(firstPart);
+    }catch(e){ try{ sink&&sink.abort&&sink.abort(); }catch(_){} throw e; }
+    return {results, books, notes:results.reduce((a,r)=>a+r.notes,0), size:results.reduce((a,r)=>a+r.size,0)};
   },
   async backup(){
     closeMoreMenu();
+    if(this._busy) return; this._busy=true;
     try{
-      const r=await this.make(); const d=new Date(); const name="LoudReader-backup-"+d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")+".lrbackup";
-      const res=await Native.saveBlob(name,"application/zip",r.blob); setStatus("");
-      if(res&&res.ok) await dlgAlert("Backup saved", r.books+" book"+(r.books===1?"":"s")+", "+r.notes+" highlight/note"+(r.notes===1?"":"s")+" and your settings were saved ("+(r.blob.size/1048576).toFixed(1)+" MB)"+(Native.has?" to Downloads/LoudReader.":"."));
-      else await dlgAlert("Backup failed","The file couldn't be saved. Check free storage and try again.");
+      const r=await this.make(); setStatus("");
+      await dlgAlert("Backup saved", r.books+" book"+(r.books===1?"":"s")+", "+r.notes+" highlight/note"+(r.notes===1?"":"s")+" and your settings ("+(r.size/1048576).toFixed(1)+" MB)"+(Native.has?" saved to Downloads/LoudReader":"")+(r.results.length>1?" in "+r.results.length+" files — keep them together; when restoring, select all of them at once.":"."));
     }catch(e){ setStatus(""); await dlgAlert("Backup failed",String(e&&e.message||e)); }
+    finally{ this._busy=false; }
   },
   restorePick(){ closeMoreMenu(); const inp=$("#backupInput"); inp.value=""; inp.click(); },
-  async restore(file){
-    if(!file) return;
+  async restore(files){
+    files=Array.from(files||[]).sort((a,b)=>a.name.localeCompare(b.name)); if(!files.length) return;
+    if(this._busy) return; this._busy=true;
     try{
-      await ensureZip(); setStatus("Reading backup…");
-      const zip=await JSZip.loadAsync(file); const j=zip.file("data.json");
-      if(!j) throw new Error("This isn't a Loud Reader backup file.");
-      const data=JSON.parse(await j.async("string"));
-      if(data.format!==this.FORMAT) throw new Error("This isn't a Loud Reader backup file.");
-      if(data.version>this.VER) throw new Error("This backup was made by a newer version of the app. Update the app first.");
-      const mode=await dlgChoose("Restore "+data.docs.length+" book"+(data.docs.length===1?"":"s")+" from backup",[
-        {label:"Merge with my current library",value:"merge"},
-        {label:"Replace everything with the backup",value:"replace",danger:true}]);
-      if(!mode){ setStatus(""); return; }
-      if(mode==="replace"){ if(!await dlgConfirm("Replace everything?","Your current books, highlights and settings will be erased and replaced by the backup. This can’t be undone.","Replace")){ setStatus(""); return; }
-        for(const st of ["docs","lib","meta","annotations","ink","parsed","covers","text"]) await DB.clearOf(st); }
-      const have=new Set((await DB.allDocs()).map(d=>d.id)); let added=0, i=0;
-      for(const d of data.docs){
-        i++; setStatus("Restoring… "+i+" of "+data.docs.length+" books");
-        if(have.has(d.id)) continue;
-        const f=zip.file("books/"+d.id); if(!f) continue;
-        const blob=await f.async("blob"); await DB.putDoc(Object.assign({},d,{blob})); added++;
-        await new Promise(r=>setTimeout(r,0));
+      let mode=null, added=0, notes=0, totalBooks=0; const have=new Set((await DB.allDocs()).map(d=>d.id));
+      for(let fi=0;fi<files.length;fi++){
+        const file=files[fi]; setStatus("Reading backup"+(files.length>1?" "+(fi+1)+" of "+files.length:"")+"…");
+        let Z=await zipOpen(file), readText, getBlob;
+        if(Z){ readText=(n)=>Z.text(n); getBlob=(n)=>Z.blob(n); }
+        else { await ensureZip(); const zip=await JSZip.loadAsync(file); readText=async(n)=>{ const f=zip.file(n); return f?await f.async("string"):null; }; getBlob=async(n)=>{ const f=zip.file(n); return f?await f.async("blob"):null; }; }
+        const jt=await readText("data.json"); if(!jt) throw new Error("\""+file.name+"\" isn't a Loud Reader backup file.");
+        const data=JSON.parse(jt);
+        if(data.format!==this.FORMAT) throw new Error("\""+file.name+"\" isn't a Loud Reader backup file.");
+        if(data.version>this.VER) throw new Error("This backup was made by a newer version of the app. Update the app first.");
+        if(!mode){
+          mode=await dlgChoose("Restore from backup"+(files.length>1?" ("+files.length+" files)":"")+" — "+data.docs.length+" book"+(data.docs.length===1?"":"s")+(files.length>1?" in the first file":""),[
+            {label:"Merge with my current library",value:"merge"},
+            {label:"Replace everything with the backup",value:"replace",danger:true}]);
+          if(!mode){ setStatus(""); return; }
+          if(mode==="replace"){ if(!await dlgConfirm("Replace everything?","Your current books, highlights and settings will be erased and replaced by the backup. This can’t be undone.","Replace")){ setStatus(""); return; }
+            for(const st of ["docs","lib","meta","annotations","ink","parsed","covers","text"]) await DB.clearOf(st); have.clear(); }
+        }
+        let i=0; totalBooks+=data.docs.length;
+        for(const d of data.docs){
+          i++; setStatus("Restoring… "+i+" of "+data.docs.length+" books"+(files.length>1?" (file "+(fi+1)+" of "+files.length+")":""));
+          if(have.has(d.id)) continue;
+          const blob=await getBlob("books/"+d.id); if(!blob) continue;
+          await DB.putDoc(Object.assign({},d,{blob})); have.add(d.id); added++;
+          await new Promise(r=>setTimeout(r,0));
+        }
+        for(const m of data.meta){ if(mode==="merge" && m.id!==Theme.SETTINGS_ID){ const cur=await DB.getMeta(m.id); if(cur){ if((cur.readSecs||0)>=(m.readSecs||0)) continue; } } await DB.putOf("meta",m); }
+        for(const a of data.annotations){ await DB.putOf("annotations",a); notes++; }
+        for(const k of data.ink) await DB.putOf("ink",k);
       }
-      for(const m of data.meta){ if(mode==="merge" && m.id!==Theme.SETTINGS_ID){ const cur=await DB.getMeta(m.id); if(cur){ if((cur.readSecs||0)>=(m.readSecs||0)) continue; } } await DB.putOf("meta",m); }
-      for(const a of data.annotations) await DB.putOf("annotations",a);
-      for(const k of data.ink) await DB.putOf("ink",k);
       setStatus("");
-      await dlgAlert("Restore complete", added+" book"+(added===1?"":"s")+" added, "+data.annotations.length+" highlights/notes and your settings restored. The app will now reload.");
+      await dlgAlert("Restore complete", added+" book"+(added===1?"":"s")+" added, "+notes+" highlights/notes and your settings restored. The app will now reload.");
       location.reload();
     }catch(e){ setStatus(""); await dlgAlert("Restore failed",String(e&&e.message||e)); }
+    finally{ this._busy=false; }
   }
 };
 $("#backupBtn").onclick=()=>Backup.backup();
 $("#restoreBtn").onclick=()=>Backup.restorePick();
-$("#backupInput").addEventListener("change",(e)=>{ const f=e.target.files&&e.target.files[0]; if(f) Backup.restore(f); });
+$("#backupInput").addEventListener("change",(e)=>{ const f=e.target.files; if(f&&f.length) Backup.restore(f); });
 
 /* ---------- offline dictionary (WordNet 3.1, compiled by tools/dict/make_dict.py) ---------- */
 const Dict = {
@@ -3262,7 +3358,7 @@ setInterval(()=>{ if(Speech.playing&&speechSynthesis.speaking&&!speechSynthesis.
 Shelf.show(false);
 window.addEventListener("pagehide",()=>{ try{ saveProgress(true); }catch(e){} });
 
-window.__LoudReader = { UI, Backup, GSearch, Dict, Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
+window.__LoudReader = { zipOpen, ensureZip, setMaxPart:(n)=>{MAX_PART=n;}, UI, Backup, GSearch, Dict, Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
 } /* end appInit */
 </script>
 </body>
