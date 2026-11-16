@@ -337,7 +337,7 @@ const Pager = {
 
   rd.addEventListener("touchstart", (e) => {
     Pager._touching = true;
-    if (!Pager.on || SelDrag.mode) return;
+    if (!Pager.on || SelDrag.mode || document.body.classList.contains("menuOpen")) return;
     // catching a page mid-slide freezes it right where it is
     const c = Pager.c(); if (c.style.transition !== "none"){ const t = curTx(); Pager.tx = t[0]; Pager.ty = t[1]; Pager.apply(false); }
     if (e.touches.length === 2){
@@ -354,7 +354,7 @@ const Pager = {
   }, { passive:true });
 
   rd.addEventListener("touchmove", (e) => {
-    if (!Pager.on || SelDrag.mode) return;
+    if (!Pager.on || SelDrag.mode || document.body.classList.contains("menuOpen")) return;
     if (e.cancelable) e.preventDefault();
     if (pz && e.touches.length === 2){
       const a = e.touches[0], b = e.touches[1], d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);

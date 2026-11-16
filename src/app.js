@@ -2596,11 +2596,18 @@ $("#searchMenuBtn").onclick=()=>{ closeMoreMenu(); Nav.open("search"); };
 $("#wordHint").onclick=()=>goToPageDialog();
 
 let _resizeSettleT=0, _lastReaderW=0;
+let _rzA=null, _rzT=0;
+function holdPosition(){   // keeps the reading spot through rotation / panel resizes (scroll mode)
+  if(!_rzA){ _rzA=Reading.stableAnchor(); Reading.suspend++; }
+  if(_rzA) Reading.restoreAnchor(_rzA);
+  clearTimeout(_rzT);
+  _rzT=setTimeout(()=>{ if(_rzA) Reading.restoreAnchor(_rzA); requestAnimationFrame(()=>{ if(_rzA) Reading.restoreAnchor(_rzA); Reading.suspend=Math.max(0,Reading.suspend-1); _rzA=null; Reading.update(true); }); }, 320);
+}
 function handleReaderResize(force){
   if (typeof Pager!=="undefined" && Pager.on){ Pager.onResize(); return; }
-  if (Reader.mode!=="pdf"){ _lastReaderW=$("#reader").clientWidth; return; }
-  const rw=$("#reader").clientWidth;
-  const widthChanged = force===true || Math.abs(rw-_lastReaderW)>1; _lastReaderW=rw;
+  const rw=$("#reader").clientWidth, widthChanged = force===true || Math.abs(rw-_lastReaderW)>1; _lastReaderW=rw;
+  const live = UI.activeId!=null && !Shelf.visible && (Reader.words.length>0 || Reading.imageOnly());
+  if (Reader.mode!=="pdf"){ if(widthChanged && live) holdPosition(); return; }
   const apply=()=>{
     Object.keys(Reader.pageWrappers).forEach(pStr=>{
       const p=Number(pStr), wrapper=Reader.pageWrappers[p];
@@ -2611,16 +2618,32 @@ function handleReaderResize(force){
     // reposition (never scroll to) the audio highlight, then re-render sharp canvases
     if (lastHi>=0 && Speech.playing) highlightPdf(lastHi, true);
   };
-  if (widthChanged && Reading.withAnchor) Reading.withAnchor(apply); else apply();
+  if (widthChanged && live){ apply(); holdPosition(); } else apply();
   clearTimeout(_resizeSettleT);
   _resizeSettleT=setTimeout(()=>{
     const redo=()=>Object.keys(Reader.pageWrappers).forEach(pStr=>{
       const p=Number(pStr), wrapper=Reader.pageWrappers[p];
       if (wrapper.dataset.rendered==="1"){ wrapper.dataset.rendered="0"; renderPageCanvas(wrapper,p); }
     });
-    if (Reading.withAnchor) Reading.withAnchor(redo); else redo();
+    if (live && Reading.withAnchor && !_rzA) Reading.withAnchor(redo); else redo();
   }, 300);
 }
+/* overlay watchdog: a full-screen scrim/dim layer that outlives its owner shows up as a grey tint. Anything visible without an owner is switched off. */
+function healOverlays(){
+  try{
+    const sc=$("#sheetScrim"); if(sc && !sc.hidden && $("#settingsSheet").hidden && $("#navSheet").hidden) sc.hidden=true;
+    const dg=$("#dlg"); if(dg && !dg.hidden && !_dlgResolve) dg.hidden=true;
+    const mm=$("#moreMenu"); if(document.body.classList.contains("menuOpen") && mm.hidden) document.body.classList.remove("menuOpen");
+    document.querySelectorAll(".scrim.show").forEach(x=>x.classList.remove("show"));
+    const root=document.documentElement;
+    if(root.classList.contains("hasDim") && !(RS.dim>0)) root.classList.remove("hasDim");
+    if(root.classList.contains("hasWarm") && !(RS.warm>0)) root.classList.remove("hasWarm");
+    const nm=$("#noteModal"); if(nm && !nm.hidden && !Annot.selecting && !Annot.editing) { /* note editor needs a selection/edit target */ }
+  }catch(e){}
+}
+setInterval(healOverlays,2500);
+["resize","orientationchange","visibilitychange","focus","pageshow"].forEach(ev=>window.addEventListener(ev,()=>setTimeout(healOverlays,120)));
+
 new ResizeObserver(()=>handleReaderResize()).observe($("#reader"));
 
 function openMoreMenu(){
@@ -2628,12 +2651,13 @@ function openMoreMenu(){
   const r=btn.getBoundingClientRect();
   menu.style.top=(r.bottom+8)+"px";
   menu.style.right=(window.innerWidth-r.right)+"px";
+  menu.style.maxHeight=Math.max(120, window.innerHeight-(r.bottom+8)-12)+"px";
   const inDoc=UI.activeId!=null && !Shelf.visible && (Reader.words.length>0 || Reading.imageOnly());
   $("#ocrMenuBtn").hidden = !(UI.activeId!=null && !Shelf.visible && ocrDocRef && ocrDocRef.id===UI.activeId && !$("#ocrBar").classList.contains("show"));
   menu.querySelectorAll("[data-needdoc]").forEach(b=>{ b.hidden=!inDoc || (Reading.imageOnly() && (b.id==="saveTextBtn"||b.id==="searchMenuBtn")); });
-  menu.hidden=false;
+  menu.hidden=false; document.body.classList.add("menuOpen");
 }
-function closeMoreMenu(){ $("#moreMenu").hidden=true; }
+function closeMoreMenu(){ $("#moreMenu").hidden=true; document.body.classList.remove("menuOpen"); }
 $("#moreBtn").onclick=(e)=>{ e.stopPropagation(); $("#moreMenu").hidden ? openMoreMenu() : closeMoreMenu(); };
 document.addEventListener("click",(e)=>{
   const menu=$("#moreMenu");

@@ -129,6 +129,7 @@ const Reading = {
     return { mode:"text", i:ans, off: s ? s.getBoundingClientRect().top - line : 0 };
   },
   restoreAnchor(a){
+    if (a && a.img && !Pager.on){ this.goToImgPage(a.p); return; }
     if (!a || !Reader.words.length) return;
     if (Pager.on){ Pager.showAnchor(a); return; }
     const rd = this.rd(), line = this.topLine();
@@ -145,6 +146,9 @@ const Reading = {
     } finally { requestAnimationFrame(()=>{ this.suspend = Math.max(0, this.suspend - 1); }); }
   },
   // Run a layout-changing function while keeping the same text at the top of the screen.
+  _pushAnchor(a){ const h = this._ah || (this._ah = []); h.push({ t:Date.now(), a }); if (h.length > 14) h.shift(); },
+  /* the reading position from just BEFORE a layout change (rotation etc.): scroll events fired by the reflow itself must not count */
+  stableAnchor(){ const h = this._ah || [], now = Date.now(); for (let k = h.length - 1; k >= 0; k--) if (now - h[k].t > 160) return h[k].a; return h.length ? h[0].a : this.anchor; },
   withAnchor(fn){
     if (Pager.on){ const pa = this.measure() || this.anchor; fn(); Pager.relayout(pa); return; }
     const a = this.measure() || this.anchor;
@@ -230,9 +234,9 @@ const Reading = {
   /* --- scroll tracking --- */
   update(force){
     if (this.suspend && !force) return;
-    if (this.imageOnly()){ this.lastActive = Date.now(); this.updateProgressUI(); saveProgress(); return; }
+    if (this.imageOnly()){ this.lastActive = Date.now(); this._pushAnchor({ img:1, p:this.pageNow() }); this.updateProgressUI(); saveProgress(); return; }
     const a = this.measure(); if (!a) return;
-    this.anchor = a; const old = this.pos; this.pos = a.i;
+    this.anchor = a; this._pushAnchor(a); const old = this.pos; this.pos = a.i;
     const d = a.i - old;
     if (d > 0 && d < 1500){ this.readWords += d; this.sessWords += d; }
     this.lastActive = Date.now();
