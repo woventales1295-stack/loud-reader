@@ -1685,16 +1685,19 @@ function highlightPdf(i, noScroll){
 }
 
 let _saveT=0;
+const _autoFin=new Set();
 function saveProgress(force){
   if(UI.activeId==null) return;
   if(!Reader.words.length){
     if(!Reading.imageOnly() || Reading.statId!==UI.activeId) return;
     const now=Date.now(); if(!force && now-_saveT<2500) return; _saveT=now;
     const pg=Reading.pageNow(), tp=Reader.totalPages||1;
-    DB.setMeta(UI.activeId,{ page:pg, progress:pg-1, wordCount:tp, lastOpened:now });   // pct = (page-1)/(pages-1) in the shelf maths
+    DB.setMeta(UI.activeId,{ page:pg, progress:pg-1, wordCount:tp, lastOpened:now });
+    if(tp>2 && pg>=tp && !_autoFin.has(UI.activeId)){ _autoFin.add(UI.activeId); DB.setMeta(UI.activeId,{finished:true,finishedAt:now}); toast("Finished — nice! (marked in your library)"); }   // pct = (page-1)/(pages-1) in the shelf maths
     return;
   }
   const now=Date.now(); if(!force && now-_saveT<2500) return; _saveT=now;
+  if(!_autoFin.has(UI.activeId) && Reader.words.length>200 && Reading.pos>=Reader.words.length*0.985){ _autoFin.add(UI.activeId); DB.setMeta(UI.activeId,{finished:true,finishedAt:now}); toast("Finished — nice! (marked in your library)"); }
   DB.setMeta(UI.activeId,{ progress:Reading.pos, audioPos:Speech.cursor, wordCount:Reader.words.length, lastOpened:now });
 }
 
@@ -2196,8 +2199,11 @@ const Shelf = {
     chain.forEach((f,i)=>mk(f.name,f.id,i===chain.length-1));
     // data for this level
     await Covers.load();
-    const here=docs.filter(d=>folderOf(d)===this.cwd);
-    const subs=folders.filter(f=>((f.parent&&fids.has(f.parent))?f.parent:null)===this.cwd).sort((a,b)=>naturalCmp(a.name||"",b.name||""));
+    const stOf=(d)=>{ const m=metaById[d.id]||{}; if(m.finished) return "finished"; return (m.progress>0 || m.page>1 || (m.readSecs||0)>20)?"reading":"unread"; };
+    const flt=this.filter||"all";
+    let here=docs.filter(d=>folderOf(d)===this.cwd);
+    if(flt!=="all") here=here.filter(d=>stOf(d)===flt);
+    const subs=flt!=="all"?[]:folders.filter(f=>((f.parent&&fids.has(f.parent))?f.parent:null)===this.cwd).sort((a,b)=>naturalCmp(a.name||"",b.name||""));
     const pctOf=(d)=>{ const m=metaById[d.id]; return (m&&m.progress>0&&m.wordCount>1)?Math.min(100,Math.round(m.progress/(m.wordCount-1)*100)):0; };
     const last=(d)=>(metaById[d.id]&&metaById[d.id].lastOpened)||d.addedAt||0;
     if(this.sort==="name") here.sort((a,b)=>naturalCmp(a.name,b.name));
@@ -2235,7 +2241,9 @@ const Shelf = {
       const cv=el("div","cover"); const t=el("div","ttl"); t.textContent=title; const fm=el("div","fmt"); fm.textContent=ext.toUpperCase().slice(0,5);
       cv.append(t,fm);
       const cu=Covers.url(d.id); if(cu){ cv.classList.add("img"); cv.style.backgroundImage="url("+cu+")"; }
-      const pc=pctOf(d); if(pc>0){ const bar=el("div","pc"); const i=el("i"); i.style.width=pc+"%"; bar.appendChild(i); cv.appendChild(bar); const tx=el("div","pcTxt"); tx.textContent=pc+"%"; cv.appendChild(tx); }
+      const fin=!!(metaById[d.id]&&metaById[d.id].finished);
+      if(fin){ const fb=el("div","finBadge"); fb.textContent="✓ Finished"; cv.appendChild(fb); }
+      const pc=fin?0:pctOf(d); if(pc>0){ const bar=el("div","pc"); const i=el("i"); i.style.width=pc+"%"; bar.appendChild(i); cv.appendChild(bar); const tx=el("div","pcTxt"); tx.textContent=pc+"%"; cv.appendChild(tx); }
       li.appendChild(cv);
       if(this.selectMode){
         const chk=el("div","checkmark"+(this.selected.has(d.id)?" checked":""));
@@ -2375,8 +2383,11 @@ const Shelf = {
     await this.render();
   },
   async bookMenu(d){
-    const c=await dlgChoose(d.name,[{label:"Open",value:"open"},{label:"Move to folder…",value:"move"},{label:"Delete from library",value:"del",danger:true}]);
+    const m0=(await DB.getMeta(d.id))||{};
+    const c=await dlgChoose(d.name,[{label:"Open",value:"open"},{label:m0.finished?"Mark as unfinished":"Mark as finished",value:"fin"},{label:"Book info",value:"info"},{label:"Move to folder…",value:"move"},{label:"Delete from library",value:"del",danger:true}]);
     if(c==="open") openDoc(d.id);
+    else if(c==="fin"){ await DB.setMeta(d.id,{finished:!m0.finished, finishedAt:m0.finished?null:Date.now()}); toast(m0.finished?"Marked as unfinished":"Marked as finished"); await this.render(); }
+    else if(c==="info") await bookInfo(d);
     else if(c==="move") await this.moveBook(d);
     else if(c==="del") await this.deleteBook(d);
   },
@@ -2398,8 +2409,9 @@ const Shelf = {
   }
 };
 $("#newFolderBtn").onclick=async()=>{ if(await Shelf.newFolder(Shelf.cwd)) Shelf.render(); };
+$("#filterSel").onchange=(e)=>{ Shelf.filter=e.target.value; Shelf.render(); try{ DB.setMeta(Theme.SETTINGS_ID,{filter:Shelf.filter}); }catch(_){} };
 $("#sortSel").onchange=(e)=>{ Shelf.sort=e.target.value; Shelf.render(); try{ DB.setMeta(Theme.SETTINGS_ID,{sort:Shelf.sort}); }catch(_){} };
-(async()=>{ try{ const m=await DB.getMeta(Theme.SETTINGS_ID); if(m&&m.sort){ Shelf.sort=m.sort; $("#sortSel").value=m.sort; } }catch(e){} })();
+(async()=>{ try{ const m=await DB.getMeta(Theme.SETTINGS_ID); if(m&&m.sort){ Shelf.sort=m.sort; $("#sortSel").value=m.sort; } if(m&&m.filter){ Shelf.filter=m.filter; $("#filterSel").value=m.filter; Shelf.render(); } }catch(e){} })();
 
 const WELCOME_HTML=$("#content").innerHTML;
 function closeCurrentDoc(){
@@ -2651,7 +2663,7 @@ function goToPage(){
   if(!Number.isFinite(n)) return;
   const idx=Reader.wordIndexForPage(n);
   if(idx==null){ setStatus("No content found for that page."); return; }
-  Reading.goToWord(idx,{noAudio:true});
+  Reading.markBack(); Reading.goToWord(idx,{noAudio:true});
 }
 $("#pageGoBtn").onclick=goToPage;
 async function goToPageDialog(){
@@ -2660,7 +2672,7 @@ async function goToPageDialog(){
     const r=await dlg({title:"Go to page",msg:"You are on page "+cur+" of "+total+". Type a page number.",input:{value:"",placeholder:"1 – "+total},ok:"Go"});
     if(!r||!r.ok) return; const k=parseInt(String(r.value||"").trim(),10); if(!Number.isFinite(k)){ toast("Enter a page number"); return; }
     const pg=clamp(k,1,total); if(k>total) toast("Last page is "+total);
-    if(Pager.on) Pager.goto(pg-1,false); else Reading.goToImgPage(pg);
+    Reading.markBack(); Reading.goToPageNo(pg);
     return;
   }
   const n=Reader.words.length; if(UI.activeId==null || !n) return;
@@ -2685,7 +2697,7 @@ async function goToPageDialog(){
     if(k>total) toast("Last page is "+total);
   }
   if(idx==null){ toast("No content found for that page"); return; }
-  Reading.goToWord(clamp(idx,0,n-1),{noAudio:true});
+  Reading.markBack(); Reading.goToWord(clamp(idx,0,n-1),{noAudio:true});
 }
 $("#gotoPageBtn").onclick=()=>{ closeMoreMenu(); goToPageDialog(); };
 $("#searchMenuBtn").onclick=()=>{ closeMoreMenu(); Nav.open("search"); };
@@ -2750,6 +2762,7 @@ function openMoreMenu(){
   menu.style.maxHeight=Math.max(120, window.innerHeight-(r.bottom+8)-12)+"px";
   const inDoc=UI.activeId!=null && !Shelf.visible && (Reader.words.length>0 || Reading.imageOnly());
   $("#ocrMenuBtn").hidden = !(UI.activeId!=null && !Shelf.visible && ocrDocRef && ocrDocRef.id===UI.activeId && !$("#ocrBar").classList.contains("show"));
+  if(inDoc) DB.getMeta(UI.activeId).then(m=>{ $("#finishBtn").textContent=(m&&m.finished)?"✓ Mark as unfinished":"✓ Mark as finished"; }).catch(()=>{});
   menu.querySelectorAll("[data-needdoc]").forEach(b=>{ b.hidden=!inDoc || (Reading.imageOnly() && (b.id==="saveTextBtn"||b.id==="searchMenuBtn")); });
   menu.hidden=false; document.body.classList.add("menuOpen");
 }
@@ -3227,6 +3240,20 @@ $("#inkClearPageBtn").onclick=async()=>{
   Ink.clearPage(p);
 };
 
+async function bookInfo(d){
+  const m=(await DB.getMeta(d.id))||{}; const ext=extOf(d.name).toUpperCase();
+  const fmtT=(sec)=>{ sec=Math.round(sec||0); const h=Math.floor(sec/3600), mi=Math.floor(sec%3600/60); return h?h+" h "+mi+" min":(mi?mi+" min":(sec?sec+" s":"—")); };
+  const wc=m.wordCount||0, pct=(m.progress>0&&wc>1)?Math.min(100,Math.round(m.progress/(wc-1)*100)):0;
+  const wpm=(m.readSecs>120&&m.readWords>0)?Math.round(m.readWords/(m.readSecs/60)):0;
+  const rows=[["Format",ext],["File size",d.size?(d.size/1048576).toFixed(d.size>1048576*10?0:1)+" MB":"—"],["Words",wc?wc.toLocaleString():"—"],
+    ["Progress",m.finished?"Finished":pct+"%"],["Time spent reading",fmtT(m.readSecs)],["Reading speed",wpm?wpm+" words/min":"—"],
+    ["Estimated time to finish",(wc&&wpm&&!m.finished)?fmtT((wc-(m.progress||0))/wpm*60):"—"],
+    ["Bookmarks",String((m.bookmarks||[]).length)],["Added",d.addedAt?new Date(d.addedAt).toLocaleDateString():"—"],["Last opened",m.lastOpened?new Date(m.lastOpened).toLocaleDateString():"—"]];
+  await dlg({title:d.name.replace(/\.[^.]+$/,""),msg:rows.map(r=>r[0]+": "+r[1]).join("\n"),cancel:false,ok:"Close"});
+}
+function flashWords(a,b){   // brief pulse so you can see where the highlight is after jumping to it
+  try{ const hit=[]; for(let i=a;i<=Math.min(b,a+60);i++){ const w=Reader.words[i]; if(w&&w.span) hit.push(w.span); } hit.forEach(e=>e.classList.add("flash")); setTimeout(()=>hit.forEach(e=>e.classList.remove("flash")),1600); }catch(e){}
+}
 function fmtAnnotSnippet(a){
   try{ return Reader.textFrom(a.startWord, Math.min(a.endWord, a.startWord+25)).slice(0,140); }catch(e){ return ""; }
 }
@@ -3240,19 +3267,22 @@ function openAnnotList(){
     const bodyEl=el("div","annotBody");
     const quote=el("div","annotQuote"); quote.textContent=fmtAnnotSnippet(a);
     bodyEl.appendChild(quote);
+    { const w0=Reader.words[a.startWord]; const n=Reader.words.length; const meta=el("div","annotMeta"); meta.textContent=(w0&&w0.page?"Page "+w0.page+" · ":"")+(n>1?Math.round(a.startWord/(n-1)*100):0)+"% · tap to jump"; bodyEl.appendChild(meta); }
     if (a.note){ const noteEl=el("div","annotNote"); noteEl.textContent=a.note; bodyEl.appendChild(noteEl); }
     const del=el("button","annotDel"); del.textContent="✕"; del.title="Delete";
     del.addEventListener("click",(e)=>{ e.stopPropagation(); Annot.deleteAnnotation(a.id); openAnnotList(); });
     row.appendChild(dot); row.appendChild(bodyEl); row.appendChild(del);
     row.addEventListener("click",()=>{
       $("#annotListModal").hidden=true;
-      Speech.jump(a.startWord);
+      Reading.markBack(); Reading.goToWord(a.startWord,{noAudio:true}); setTimeout(()=>flashWords(a.startWord,a.endWord),350);
     });
     body.appendChild(row);
   });
   $("#annotListModal").hidden=false;
 }
 $("#annotListBtn").onclick=()=>{ closeMoreMenu(); openAnnotList(); };
+$("#bookInfoBtn").onclick=async()=>{ closeMoreMenu(); if(currentDoc) await bookInfo(currentDoc); };
+$("#finishBtn").onclick=async()=>{ closeMoreMenu(); if(UI.activeId==null) return; const m=(await DB.getMeta(UI.activeId))||{}; await DB.setMeta(UI.activeId,{finished:!m.finished, finishedAt:m.finished?null:Date.now()}); toast(m.finished?"Marked as unfinished":"Marked as finished"); };
 const baseName=(n)=>(n||"book").replace(/\.[^.]+$/,"").replace(/[\\/:*?"<>|]+/g,"_").slice(0,80)||"book";
 async function exportAnnotations(){
   const items=[...Annot.items].sort((x,y)=>x.startWord-y.startWord);

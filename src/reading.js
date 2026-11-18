@@ -22,7 +22,7 @@ const THEME_LIST = [
   { id:"black", name:"Black", bg:"#000000", fg:"#cfd3da" }
 ];
 const RS_DEFAULT = { font:"sans", fs:20, lh:1.8, ps:1.0, mx:6, align:"left", hyphen:false, dim:0, warm:0,
-  tapZones:true, volKeys:false, keepOn:true, tapWordRead:false, dimRead:false, pdfZoom:1, autoSpeed:6, flip:false, lfs:13 };
+  bold:false, indent:false, orient:"auto", brightCustom:false, bright:0.6, tapZones:true, volKeys:false, keepOn:true, tapWordRead:false, dimRead:false, pdfZoom:1, autoSpeed:6, flip:false, lfs:13 };
 const RS = Object.assign({}, RS_DEFAULT);
 const HDR_H = 56;
 
@@ -97,6 +97,32 @@ const Reading = {
   },
   /* comics and scanned PDFs without any text words: progress is a page number, not a word index */
   imageOnly(){ return Reader.mode === "pdf" && !Reader.words.length && (Reader.totalPages || 0) > 0; },
+  /* "Back to where I was": every deliberate jump (contents, search, bookmark, highlight, page box, scrubber) remembers the spot it left */
+  _where(){
+    if (this.imageOnly()){ const pg = this.pageNow(); return { img:1, page:pg, label:"page " + pg }; }
+    if (!Reader.words.length) return null;
+    const i = clamp(Pager.on ? Pager.firstWord(Pager.idx) : (this.pos || 0), 0, Reader.words.length - 1), w = Reader.words[i], n = Reader.words.length;
+    return { i, label: (w && w.page ? "page " + w.page : (n > 1 ? Math.round(i / (n - 1) * 100) : 0) + "%") };
+  },
+  markBack(){
+    const cur = this._where(); if (!cur) return;
+    const st = this.backStack || (this.backStack = []), last = st[st.length - 1];
+    if (last && ((cur.img && last.img && last.page === cur.page) || (!cur.img && !last.img && Math.abs(last.i - cur.i) < 120))) { this._showBack(); return; }
+    st.push(cur); if (st.length > 12) st.shift(); this._showBack();
+  },
+  _showBack(){
+    const st = this.backStack || [], chip = $("#backChip"); if (!chip) return;
+    if (!st.length){ chip.hidden = true; return; }
+    $("#backBtn").textContent = "↩ Back to " + st[st.length - 1].label; chip.hidden = false;
+    clearTimeout(this._backT); this._backT = setTimeout(() => { chip.hidden = true; }, 25000);
+  },
+  goBack(){
+    const st = this.backStack || []; const t = st.pop(); if (!t){ this._showBack(); return; }
+    if (t.img) this.goToPageNo(t.page); else this.goToWord(t.i, { noAudio:true });
+    this._showBack();
+  },
+  clearBack(){ this.backStack = []; this._searchMarked = false; const c = $("#backChip"); if (c) c.hidden = true; },
+  goToPageNo(pg){ if (Pager.on) Pager.goto(pg - 1, false); else this.goToImgPage(pg); },
   goToImgPage(pg){
     const rd = this.rd(), w = Reader.pageWrappers[pg]; if (!w) return;
     this.suspend++;
@@ -352,6 +378,7 @@ const Reading = {
 
   /* --- restore on open --- */
   restore(meta){
+    this.clearBack();
     const willPage = !!RS.flip && (Reader.words.length > 0 || this.imageOnly()) && !(typeof Ink !== "undefined" && Ink.active);
     const rd = this.rd(); if (!willPage){ rd.scrollTop = 0; rd.scrollLeft = 0; }
     this.chapters = null; this.chapIdx = -1; this.anchor = null;
@@ -374,26 +401,29 @@ const Reading = {
 
   /* --- bookmarks --- */
   visibleRange(){
-    if (Pager.on && Pager.mode === "text" && Pager.count){   // paged: the page's word span comes straight from the pager's cached starts, no layout reads
+    if (this.imageOnly()){ const pg = this.pageNow(); return [pg, pg]; }
+    if (Pager.on && Pager.count){   // paged (text or PDF): the page's word span comes straight from the pager, no layout reads
       const a = Pager.firstWord(Pager.idx), nx = Pager.idx + 1 < Pager.count ? Pager.firstWord(Pager.idx + 1) : Reader.words.length;
-      return [a, Math.max(a, nx - 1)];
+      return [a, nx - 1];
     }
     const a = this.measure(); if (!a) return [0, 0];
     const rd = this.rd().getBoundingClientRect(); let b = a.i;
     if (Reader.mode === "pdf"){
-      const p = this._firstPageBelow(rd.bottom - 4); b = Reader.words.length ? this.wordForPageFrac(p, 0.999) : a.i;
+      const bottom = rd.bottom - 4, p = this._firstPageBelow(bottom), w = Reader.pageWrappers[p];
+      if (w && Reader.words.length){ const r = w.getBoundingClientRect(); b = this.wordForPageFrac(p, clamp((bottom - r.top) / Math.max(1, r.height), 0, 0.999)); }
     } else {
       let lo = a.i, hi = Reader.words.length - 1, ans = hi;
       while (lo <= hi){ const m = (lo + hi) >> 1, s = Reader.words[m].span; if (!s){ hi = m - 1; continue; }
         if (s.getBoundingClientRect().top > rd.bottom - 40){ ans = m; hi = m - 1; } else lo = m + 1; }
       b = Math.max(a.i, ans - 1);
     }
-    return [a.i, b];
+    return [a.i, Math.max(a.i, b)];
   },
   bookmarkHere(){
     if (!this.bookmarks || !this.bookmarks.length) return null;
     const [a, b] = this.visibleRange();
-    return this.bookmarks.find(m => m.i >= a && m.i <= b) || null;
+    if (this.imageOnly()) return this.bookmarks.find(m => m.img && m.page === a) || null;
+    return this.bookmarks.find(m => !m.img && m.i >= a && m.i <= b) || null;
   },
   updateBookmarkBtn(){
     const on = !!this.bookmarkHere();
@@ -403,9 +433,14 @@ const Reading = {
       : "M17 3H7a2 2 0 00-2 2v16l7-3 7 3V5a2 2 0 00-2-2zm0 15-5-2.18L7 18V5h10v13z");
   },
   async toggleBookmark(){
-    if (UI.activeId == null || !Reader.words.length) return;
+    if (UI.activeId == null || !(Reader.words.length || this.imageOnly())) return;
     const ex = this.bookmarkHere();
     if (ex){ this.bookmarks = this.bookmarks.filter(m => m.id !== ex.id); toast("Bookmark removed"); }
+    else if (this.imageOnly()){
+      const pg = this.pageNow(), tp = Reader.totalPages || 1;
+      this.bookmarks.push({ id:uid(), i:0, img:1, page:pg, t:Date.now(), pct: tp > 1 ? Math.round((pg - 1) / (tp - 1) * 100) : 0, snip:"Page " + pg, chap:"" });
+      toast("Bookmarked");
+    }
     else {
       const [a] = this.visibleRange(), n = Reader.words.length;
       const snip = Reader.textFrom(a, Math.min(n - 1, a + 14));
@@ -414,7 +449,7 @@ const Reading = {
         chap: (this.chapIdx >= 0 && this.chapters && this.chapters[this.chapIdx]) ? this.chapters[this.chapIdx].title : "" });
       toast("Bookmarked");
     }
-    this.bookmarks.sort((x, y) => x.i - y.i);
+    this.bookmarks.sort((x, y) => (x.img ? x.page : x.i) - (y.img ? y.page : y.i));
     try{ await DB.setMeta(UI.activeId, { bookmarks:this.bookmarks }); }catch(e){}
     this.updateBookmarkBtn();
   },
@@ -459,11 +494,12 @@ const Reading = {
     if (!this.searchHits.length) return;
     this.searchIdx = ((k % this.searchHits.length) + this.searchHits.length) % this.searchHits.length;
     const h = this.searchHits[this.searchIdx];
+    if (!this._searchMarked){ this._searchMarked = true; this.markBack(); }
     this.goToWord(h.a, { smooth:false, noAudio:true });
     this.markHit(h);
     $("#searchChip").hidden = false; $("#searchCount").textContent = (this.searchIdx + 1) + " / " + this.searchHits.length;
   },
-  clearSearch(){ this.searchHits = []; this.searchIdx = -1; this.clearSearchMarks(); $("#searchChip").hidden = true; },
+  clearSearch(){ this._searchMarked = false; this.searchHits = []; this.searchIdx = -1; this.clearSearchMarks(); $("#searchChip").hidden = true; },
 
   /* --- chrome visibility + body state --- */
   syncChrome(){
@@ -655,18 +691,19 @@ const Settings = {
     c.setProperty("--fs", RS.fs + "px"); c.setProperty("--lh", RS.lh); c.setProperty("--ps", RS.ps + "em");
     c.setProperty("--ff", FONT_STACKS[RS.font] || FONT_STACKS.sans); c.setProperty("--ta", RS.align);
     c.setProperty("--hy", RS.hyphen ? "auto" : "manual"); c.setProperty("--pdfzoom", RS.pdfZoom);
+    c.setProperty("--fw", RS.bold ? "700" : "400"); c.setProperty("--ti", RS.indent ? "1.6em" : "0");
     r.setProperty("--mx", RS.mx + "vw");
     document.documentElement.style.setProperty("--fold-fs", (RS.lfs || 13) + "px");
     document.documentElement.style.setProperty("--dim", RS.dim); document.documentElement.style.setProperty("--warm", RS.warm);
     document.documentElement.classList.toggle("hasDim", RS.dim > 0); document.documentElement.classList.toggle("hasWarm", RS.warm > 0);
     if (!document.documentElement.lang) document.documentElement.lang = "en";
     $("#fontSize") && ($("#fontSize").value = RS.fs);
-    try{ if (Native.has) AndroidBridge.setVolumeKeyPaging(!!RS.volKeys); }catch(e){}
+    try{ if (Native.has){ AndroidBridge.setVolumeKeyPaging(!!RS.volKeys); if (AndroidBridge.setOrientation) AndroidBridge.setOrientation(RS.orient || "auto"); if (AndroidBridge.setBrightness) AndroidBridge.setBrightness(RS.brightCustom ? RS.bright : -1); } }catch(e){}
     Reading.keepAwake(); Pager.sync();
   },
   set(key, val){
     RS[key] = val;
-    const layout = ["fs","lh","ps","mx","font","align","hyphen"].includes(key);
+    const layout = ["fs","lh","ps","mx","font","align","hyphen","bold","indent"].includes(key);
     if (layout && Reader.words.length) Reading.withAnchor(() => this.applyAll()); else this.applyAll();
     if (key === "fs" || key === "font" || key === "flip") this.syncOpen();
     this.save();
@@ -710,8 +747,12 @@ const Settings = {
       rng("mx", 0, 22, 1, "Side margins", v => v + "%") +
       '<div class="setRow"><label>Align</label>' + seg("align", [["left","Left"],["justify","Justify"]]) + '</div>' +
       tog("hyphen", "Hyphenate words") +
+      tog("bold", "Bold text") +
+      tog("indent", "Indent first line of paragraphs") +
       (Reader.mode === "pdf" && !Pager.on ? '<div class="setTitle">PDF page</div>' + rng("pdfZoom", 1, 4, 0.1, "Zoom", v => Math.round(v * 100) + "%") + '<div class="setRow"><span class="lbl"></span><div class="seg"><button data-fit="1">Fit width</button><button data-fit="1.5">150%</button><button data-fit="2">200%</button></div></div>' : '') +
       '<div class="setTitle">Screen</div>' +
+      (Native.has ? tog("brightCustom", "Set screen brightness here") + (RS.brightCustom ? rng("bright", 0.02, 1, 0.02, "Brightness", v => Math.round(v * 100) + "%") : "") +
+        '<div class="setRow"><label>Orientation</label>' + seg("orient", [["auto","Auto"],["portrait","Portrait"],["landscape","Landscape"]]) + '</div>' : "") +
       rng("dim", 0, 0.7, 0.05, "Dim", v => Math.round(v * 100) + "%") +
       rng("warm", 0, 0.5, 0.05, "Warm light", v => Math.round(v * 200) + "%") +
       tog("keepOn", "Keep screen on while reading") +
@@ -736,11 +777,12 @@ $("#settingsBody").addEventListener("input", (e) => {
   else if (r === "autoSpeed"){ RS.autoSpeed = v; Reading._autoLabel(); Settings.save(); }
   else Settings.set(r, v);
   const val = e.target.parentElement.querySelector(".val");
-  if (val){ val.textContent = r === "mx" ? v + "%" : r === "dim" ? Math.round(v * 100) + "%" : r === "warm" ? Math.round(v * 200) + "%" : r === "pdfZoom" ? Math.round(v * 100) + "%" : (r === "lh" || r === "ps") ? v.toFixed(1) : v; }
+  if (val){ val.textContent = r === "mx" ? v + "%" : r === "dim" ? Math.round(v * 100) + "%" : r === "warm" ? Math.round(v * 200) + "%" : r === "bright" ? Math.round(v * 100) + "%" : r === "pdfZoom" ? Math.round(v * 100) + "%" : (r === "lh" || r === "ps") ? v.toFixed(1) : v; }
 });
 $("#settingsBody").addEventListener("change", (e) => {
   const t = e.target.dataset && e.target.dataset.t; if (!t) return;
-  RS[t] = !!e.target.checked; Settings.applyAll(); Settings.save();
+  if (t === "bold" || t === "indent" || t === "hyphen") Settings.set(t, !!e.target.checked); else { RS[t] = !!e.target.checked; Settings.applyAll(); }
+  Settings.save(); if (t === "brightCustom") Settings.build();
   if (t === "dimRead" && !RS.dimRead) document.querySelectorAll(".w.read").forEach(x => x.classList.remove("read"));
 });
 $("#settingsBody").addEventListener("click", (e) => {
@@ -778,14 +820,14 @@ const Nav = {
     if (!list.length){
       body.innerHTML = '<div class="navEmpty">No chapters were found in this book.<br>Jump by percentage instead:</div>';
       const row = el("div", "seg"); row.style.padding = "0 4px";
-      [0, 10, 20, 30, 40, 50, 60, 70, 80, 90].forEach(p => { const b = el("button"); b.textContent = p + "%"; b.onclick = () => { Reading.goToWord(Math.round(Reader.words.length * p / 100), { noAudio:true }); this.close(); }; row.appendChild(b); });
+      [0, 10, 20, 30, 40, 50, 60, 70, 80, 90].forEach(p => { const b = el("button"); b.textContent = p + "%"; b.onclick = () => { Reading.markBack(); Reading.goToWord(Math.round(Reader.words.length * p / 100), { noAudio:true }); this.close(); }; row.appendChild(b); });
       body.appendChild(row); return;
     }
     list.forEach((c, k) => {
       const r = el("div", "navRow" + (c.lvl > 1 ? " l" + Math.min(3, c.lvl) : "") + (k === Reading.chapIdx ? " cur" : ""));
       const t = el("div", "t"); t.textContent = c.title;
       const pg = el("div", "pg"); pg.textContent = c.page ? "p. " + c.page : Math.round(c.i / Math.max(1, Reader.words.length - 1) * 100) + "%";
-      r.append(t, pg); r.onclick = () => { Reading.goToWord(c.i, { noAudio:false }); this.close(); }; body.appendChild(r);
+      r.append(t, pg); r.onclick = () => { Reading.markBack(); Reading.goToWord(c.i, { noAudio:false }); this.close(); }; body.appendChild(r);
     });
     const cur = body.querySelector(".cur"); if (cur) cur.scrollIntoView({ block:"center" });
   },
@@ -799,7 +841,7 @@ const Nav = {
       const s = el("small"); s.textContent = (m.chap ? m.chap + " · " : "") + (m.page ? "p. " + m.page + " · " : "") + m.pct + "%"; t.appendChild(s);
       const rm = el("button", "rm"); rm.textContent = "✕"; rm.title = "Delete";
       rm.onclick = async (ev) => { ev.stopPropagation(); Reading.bookmarks = Reading.bookmarks.filter(x => x.id !== m.id); try{ await DB.setMeta(UI.activeId, { bookmarks:Reading.bookmarks }); }catch(err){} Reading.updateBookmarkBtn(); this.render(); };
-      r.append(t, rm); r.onclick = () => { Reading.goToWord(m.i, { noAudio:false }); this.close(); }; body.appendChild(r);
+      r.append(t, rm); r.onclick = () => { Reading.markBack(); if (m.img) Reading.goToPageNo(m.page); else Reading.goToWord(m.i, { noAudio:false }); this.close(); }; body.appendChild(r);
     });
     const hl = el("button"); hl.textContent = "Highlights & notes…"; hl.onclick = () => { this.close(); openAnnotList(); }; body.appendChild(hl);
   },
@@ -857,10 +899,11 @@ $("#searchClear").onclick = () => Reading.clearSearch();
 (function(){
   const seek = $("#seek");
   seek.addEventListener("pointerdown", () => { Reading._scrubbing = true; });
-  const done = () => { Reading._scrubbing = false; };
+  const done = () => { Reading._scrubbing = false; Reading._scrubMarked = false; };
   seek.addEventListener("pointerup", done); seek.addEventListener("pointercancel", done); seek.addEventListener("change", done);
   seek.addEventListener("input", () => {
     const i = parseInt(seek.value, 10); if (!Number.isFinite(i)) return;
+    if (!Reading._scrubMarked){ Reading._scrubMarked = true; Reading.markBack(); }
     Reading.goToWord(i, { noAudio:true });
     const n = Reader.words.length; $("#posLabel").textContent = (n > 1 ? Math.round(i / (n - 1) * 100) : 100) + "%";
     Follow.userScrolled();
@@ -946,3 +989,6 @@ $("#autoStop").onclick = () => Reading.stopAuto();
 
 // safety net: never leave the dimming scrim up without a sheet on screen
 document.addEventListener("visibilitychange", syncScrim); window.addEventListener("pageshow", syncScrim); setInterval(syncScrim, 2000);
+
+$("#backBtn").addEventListener("click", () => Reading.goBack());
+$("#backClose").addEventListener("click", () => { Reading.backStack = []; Reading._showBack(); });

@@ -396,6 +396,29 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         }
 
         @JavascriptInterface
+        public void setOrientation(final String mode) {
+            runOnUiThread(new Runnable() { public void run() {
+                try {
+                    int o = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+                    if ("portrait".equals(mode)) o = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT;
+                    else if ("landscape".equals(mode)) o = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+                    setRequestedOrientation(o);
+                } catch (Exception e) { /* ignore */ }
+            } });
+        }
+
+        @JavascriptInterface
+        public void setBrightness(final float level) {
+            runOnUiThread(new Runnable() { public void run() {
+                try {
+                    android.view.WindowManager.LayoutParams lp = getWindow().getAttributes();
+                    lp.screenBrightness = level < 0 ? android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE : Math.max(0.02f, Math.min(1f, level));
+                    getWindow().setAttributes(lp);
+                } catch (Exception e) { /* ignore */ }
+            } });
+        }
+
+        @JavascriptInterface
         public void setVolumeKeyPaging(boolean on) {
             volumeKeyPaging = on;
         }
