@@ -2971,7 +2971,7 @@ const Annot = {
 };
 
 let _lpTimer=null, _lpStartX=0, _lpStartY=0, _lpFired=false, _suppressNextClick=false, _suppressClickT=null;
-const LP_MS=480, LP_MOVE_TOL=10;
+const LP_MS=300, LP_MOVE_TOL=18;   // hold time before the highlight toolbar appears; tolerance so finger jitter doesn't cancel the hold
 function suppressNextClick(){
   _suppressNextClick=true;
   // Safety net: if for any reason the click event never actually fires
