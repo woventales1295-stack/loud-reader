@@ -4,3 +4,5 @@ apk_build/assets/
 desktop/node_modules/
 desktop/dist/
 desktop/app/
+desktop-swift/build/
+desktop-swift/app/

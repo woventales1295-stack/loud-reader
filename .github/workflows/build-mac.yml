@@ -2,9 +2,6 @@ name: Build Loud Reader for macOS
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-    paths: [ 'desktop/**', 'src/**', 'tools/**', '.github/workflows/build-mac.yml' ]
 
 permissions:
   contents: write
