@@ -122,8 +122,16 @@
   .icon-btn.active, .menu-item.active{background:var(--accent); color:#fff; border-color:var(--accent)}
   .icon-btn.active:hover{border-color:var(--accent)}
 
-  #noteModal,#annotListModal{position:fixed; inset:0; z-index:80; background:rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; padding:20px}
-  #noteModal[hidden],#annotListModal[hidden]{display:none}
+  #noteModal,#annotListModal,#syncModal{position:fixed; inset:0; z-index:80; background:rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; padding:20px}
+  #noteModal[hidden],#annotListModal[hidden],#syncModal[hidden]{display:none}
+  #syncModal .modalCard{overflow:auto}
+  .syncNote{font-size:13px; color:var(--muted); line-height:1.4}
+  .syncBox{display:flex; flex-direction:column; gap:8px; padding:12px; border-radius:12px; background:var(--panel2)}
+  .syncBox input{padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--text); font:inherit}
+  .syncBig{font-size:20px; font-weight:700; letter-spacing:.04em; white-space:pre-line; user-select:text}
+  #syncStatus{font-size:13px; min-height:18px}
+  #syncBar{height:4px; border-radius:2px; background:var(--panel2); overflow:hidden}
+  #syncBar i{display:block; height:100%; width:0; background:var(--accent); transition:width .2s}
   .modalCard{background:var(--panel); border-radius:16px; padding:18px; width:100%; max-width:420px; max-height:80vh; display:flex; flex-direction:column; gap:10px; box-shadow:var(--shadow)}
   .modalCardLarge{max-width:520px}
   .modalCard h3{margin:0; font-size:17px}

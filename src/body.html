@@ -30,6 +30,7 @@
   <button id="ocrMenuBtn" class="menu-item" hidden><svg viewBox="0 0 24 24"><path d="M4 7V4h3M17 4h3v3M20 17v3h-3M7 20H4v-3M8 9h8M8 12h8M8 15h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> Run OCR (make text readable aloud)</button>
   <button id="backupBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg> Back up all data</button>
   <button id="restoreBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z" transform="rotate(180 12 12)"/></svg> Restore from backup</button>
+  <button id="syncMenuBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6a6 6 0 016 6c0 1-.25 1.97-.7 2.8l1.46 1.46A7.9 7.9 0 0020 12a8 8 0 00-8-8zm0 14a6 6 0 01-6-6c0-1 .25-1.97.7-2.8L5.24 7.74A7.9 7.9 0 004 12a8 8 0 008 8v3l4-4-4-4v3z"/></svg> Sync over Wi‑Fi</button>
   <button id="dictMenuBtn" class="menu-item"><svg viewBox="0 0 24 24"><path d="M18 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/></svg> Dictionary</button>
   <button id="searchMenuBtn" class="menu-item" data-needdoc><svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg> Search in book</button>
   <button id="gotoPageBtn" class="menu-item" data-needdoc><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm2 14h-3v3h-2v-3H8v-2h3v-3h2v3h3v2zM13 9V3.5L18.5 9H13z"/></svg> Go to page…</button>
@@ -150,6 +151,27 @@
       <button id="noteCancelBtn">Cancel</button>
       <button id="noteSaveBtn" class="btn-accent">Save</button>
     </div>
+  </div>
+</div>
+
+<div id="syncModal" hidden>
+  <div class="modalCard">
+    <h3>Sync over Wi‑Fi</h3>
+    <div id="syncNone" class="syncNote" hidden>Wi‑Fi sync works in the Android and Mac apps.</div>
+    <div id="syncBody">
+      <div class="syncNote">Put both devices on the same Wi‑Fi and open this window on each. On one, tap “Show my sync code”; on the other, type that address and code and tap “Sync now”. Both directions are merged: reading positions, bookmarks, highlights, notes, drawings and books.</div>
+      <div class="syncBox"><b>This device waits</b>
+        <div id="syncHostOff"><button id="syncHostBtn" class="btn-accent">Show my sync code</button></div>
+        <div id="syncHostOn" hidden><div id="syncAddr" class="syncBig"></div><div>Code: <span id="syncCode" class="syncBig"></span></div><button id="syncHostStop">Stop</button></div>
+      </div>
+      <div class="syncBox"><b>This device connects</b>
+        <input id="syncAddrIn" placeholder="Address, e.g. 192.168.1.5:8765" autocapitalize="off" autocomplete="off" spellcheck="false" />
+        <input id="syncCodeIn" placeholder="6-digit code" inputmode="numeric" maxlength="6" autocomplete="off" />
+        <button id="syncGo" class="btn-accent">Sync now</button>
+      </div>
+      <div id="syncStatus"></div><div id="syncBar"><i></i></div>
+    </div>
+    <div class="modalActions"><span class="grow"></span><button id="syncClose">Close</button></div>
   </div>
 </div>
 

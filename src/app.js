@@ -161,6 +161,8 @@ const Native = {
       abort(){ try{ AndroidBridge.abortSave(); }catch(e){} }
     };
   },
+  async syncStart(){ try{ if(this.has) return JSON.parse(AndroidBridge.syncStart()); if(this.desktop) return JSON.parse(await DesktopBridge.syncStart()); }catch(e){} return null; },
+  syncStop(){ try{ if(this.has) AndroidBridge.syncStop(); else if(this.desktop) DesktopBridge.syncStop(); }catch(e){} },
   open(uri, mime){ try{ if(this.desktop){ DesktopBridge.reveal(uri); return true; } return this.has && AndroidBridge.openUri(uri, mime); }catch(e){ return false; } },
   // Lets the user import a whole folder (with subfolders) from the device.
   // Resolves to an array of {id,name,path,size} (path includes the picked
@@ -247,11 +249,16 @@ const DB = (() => {
     getDoc:(id)=>run("docs","readonly",s=>s.get(id)),
     allDocs:()=>run("lib","readonly",s=>s.getAll()),
     async delDoc(id){ const db=await open(); return new Promise((res,rej)=>{ const tx=db.transaction(["docs","lib"],"readwrite");
-      tx.objectStore("docs").delete(id); tx.objectStore("lib").delete(id); tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); }); },
+      tx.objectStore("docs").delete(id); tx.objectStore("lib").delete(id); tx.oncomplete=()=>{ this.tomb("docs",id).catch(()=>{}); res(); }; tx.onerror=()=>rej(tx.error); }); },
+    tomb(kind,id){   // remembers deletions so Wi-Fi sync can tell "deleted here" from "never had it"
+      const job=async()=>{ const cur=(await this.getMeta("__tomb__"))||{id:"__tomb__",docs:{},ann:{},ink:{}}; (cur[kind]=cur[kind]||{})[id]=Date.now(); await run("meta","readwrite",s=>s.put(cur)); };
+      const r=(this._tq||Promise.resolve()).then(job,job); this._tq=r.catch(()=>{}); return r; },
+    untomb(kind,id){ const job=async()=>{ const cur=await this.getMeta("__tomb__"); if(cur&&cur[kind]&&cur[kind][id]){ delete cur[kind][id]; await run("meta","readwrite",s=>s.put(cur)); } };
+      const r=(this._tq||Promise.resolve()).then(job,job); this._tq=r.catch(()=>{}); return r; },
     getMeta:(id)=>run("meta","readonly",s=>s.get(id)), allMeta:()=>run("meta","readonly",s=>s.getAll()),
     delMeta:(id)=>run("meta","readwrite",s=>s.delete(id)),
     setMeta(id,patch){   // serialised: two overlapping read-modify-writes used to overwrite each other's fields (lost saved positions)
-      const job=()=>this.getMeta(id).then(cur=>{ cur=cur||{id}; Object.assign(cur,patch,{id}); return run("meta","readwrite",s=>s.put(cur)); });
+      const job=()=>this.getMeta(id).then(cur=>{ cur=cur||{id}; Object.assign(cur,patch,{id}); if(id.charAt(0)!=="_"){ const t=Date.now(); if("progress" in patch||"page" in patch) cur.pu=t; if("finished" in patch) cur.fu=t; if("bookmarks" in patch) cur.bu=t; } return run("meta","readwrite",s=>s.put(cur)); });
       const r=(this._mq||Promise.resolve()).then(job,job); this._mq=r.catch(()=>{}); return r; },
     getAllOf:(st)=>run(st,"readonly",s=>s.getAll()), putOf:(st,o)=>run(st,"readwrite",s=>s.put(o)), clearOf:(st)=>run(st,"readwrite",s=>s.clear()),
     putText:(t)=>run("text","readwrite",s=>s.put(t)), getText:(id)=>run("text","readonly",s=>s.get(id)), allTextKeys:()=>run("text","readonly",s=>s.getAllKeys()), delText:(id)=>run("text","readwrite",s=>s.delete(id)),
@@ -259,7 +266,7 @@ const DB = (() => {
     putParsed:(d)=>run("parsed","readwrite",s=>s.put(d)), getParsed:(id)=>run("parsed","readonly",s=>s.get(id)),
     delParsed:(id)=>run("parsed","readwrite",s=>s.delete(id)),
     putAnnotation:(a)=>run("annotations","readwrite",s=>s.put(a)),
-    delAnnotation:(id)=>run("annotations","readwrite",s=>s.delete(id)),
+    delAnnotation(id,quiet){ if(!quiet) this.tomb("ann",id).catch(()=>{}); return run("annotations","readwrite",s=>s.delete(id)); },
     async annotationsForDoc(docId){
       const db = await open();
       return new Promise((res,rej)=>{
@@ -270,10 +277,10 @@ const DB = (() => {
     },
     async delAnnotationsForDoc(docId){
       const items = await this.annotationsForDoc(docId);
-      return Promise.all(items.map(a=>this.delAnnotation(a.id)));
+      return Promise.all(items.map(a=>this.delAnnotation(a.id,true)));
     },
     putInk:(s)=>run("ink","readwrite",st=>st.put(s)),
-    delInk:(id)=>run("ink","readwrite",st=>st.delete(id)),
+    delInk(id,quiet){ if(!quiet) this.tomb("ink",id).catch(()=>{}); return run("ink","readwrite",st=>st.delete(id)); },
     async inkForDoc(docId){
       const db = await open();
       return new Promise((res,rej)=>{
@@ -284,7 +291,7 @@ const DB = (() => {
     },
     async delInkForDoc(docId){
       const items = await this.inkForDoc(docId);
-      return Promise.all(items.map(s=>this.delInk(s.id)));
+      return Promise.all(items.map(s=>this.delInk(s.id,true)));
     },
   };
 })();
@@ -1855,7 +1862,7 @@ const Backup = {
           i++; setStatus("Restoring… "+i+" of "+data.docs.length+" books"+(files.length>1?" (file "+(fi+1)+" of "+files.length+")":""));
           if(have.has(d.id)) continue;
           const blob=await getBlob("books/"+d.id); if(!blob) continue;
-          await DB.putDoc(Object.assign({},d,{blob})); have.add(d.id); added++;
+          await DB.putDoc(Object.assign({},d,{blob})); DB.untomb("docs",d.id).catch(()=>{}); have.add(d.id); added++;
           await new Promise(r=>setTimeout(r,0));
         }
         for(const m of data.meta){ if(mode==="merge" && m.id!==Theme.SETTINGS_ID){ const cur=await DB.getMeta(m.id); if(cur){ if((cur.readSecs||0)>=(m.readSecs||0)) continue; } } await DB.putOf("meta",m); }
@@ -2929,9 +2936,9 @@ const Annot = {
     const modal=$("#noteModal");
     const text=$("#noteText").value.trim();
     const a=parseInt(modal.dataset.startWord,10), b=parseInt(modal.dataset.endWord,10);
-    const editingId=modal.dataset.editingId;
+    const editingId=modal.dataset.editingId; const existing0=editingId?this.items.find(x=>x.id===editingId):null;
     const id=editingId || (crypto.randomUUID?crypto.randomUUID():String(Date.now()+Math.random()));
-    const rec={ id, docId:UI.activeId, page:(Reader.words[a]?Reader.words[a].page:null), startWord:a, endWord:b, color:modal.dataset.color||"blue", note:text, createdAt:Date.now() };
+    const rec={ id, docId:UI.activeId, page:(Reader.words[a]?Reader.words[a].page:null), startWord:a, endWord:b, color:modal.dataset.color||"blue", note:text, createdAt:(existing0&&existing0.createdAt)||Date.now(), ut:Date.now() };
     try{ await DB.putAnnotation(rec); }catch(e){}
     const idx=this.items.findIndex(x=>x.id===id);
     if (idx>=0) this.items[idx]=rec; else this.items.push(rec);
@@ -3407,7 +3414,7 @@ if(Native.desktop){   // files opened from Finder ("Open With", double-click) or
   DesktopBridge.onOpenFile(async(name,bytes)=>{ try{ await importFiles([new File([bytes],name)],{silent:false}); }catch(e){} });
   document.documentElement.classList.add("desktop");
 }
-window.__LoudReader = { zipOpen, ensureZip, setMaxPart:(n)=>{MAX_PART=n;}, UI, Backup, GSearch, Dict, Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
+window.__LoudReader = { Sync, zipOpen, ensureZip, setMaxPart:(n)=>{MAX_PART=n;}, UI, Backup, GSearch, Dict, Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
 } /* end appInit */
 </script>
 </body>

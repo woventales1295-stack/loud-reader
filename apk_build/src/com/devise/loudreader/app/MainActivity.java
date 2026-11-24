@@ -28,6 +28,11 @@ import android.widget.Toast;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.HashMap;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -265,6 +270,37 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         }
     }
 
+    private static class SyncWait { final CountDownLatch latch = new CountDownLatch(1); int status = 504; String text = "{\"error\":\"timed out\"}"; }
+    private SyncServer syncServer;
+    private final AtomicInteger syncSeq = new AtomicInteger();
+    private final ConcurrentHashMap<Integer, SyncWait> syncWaits = new ConcurrentHashMap<Integer, SyncWait>();
+    private final ConcurrentHashMap<Integer, String> syncBodies = new ConcurrentHashMap<Integer, String>();
+
+    /** Runs on a server thread: hands the request to the page's JavaScript and waits for its reply. */
+    private SyncServer.Reply syncForward(String method, String target, String body) {
+        final int id = syncSeq.incrementAndGet();
+        SyncWait w = new SyncWait();
+        syncWaits.put(id, w);
+        if (body != null && body.length() > 0) syncBodies.put(id, body);
+        final String js = "window.__lrSyncDispatch&&window.__lrSyncDispatch(" + id + ",'" + method.replaceAll("[^A-Z]", "") + "'," + jsQuote(target) + ")";
+        runOnUiThread(new Runnable() { public void run() { if (webView != null) webView.evaluateJavascript(js, null); } });
+        try { w.latch.await(120, TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
+        syncWaits.remove(id);
+        syncBodies.remove(id);
+        return new SyncServer.Reply(w.status, w.text);
+    }
+
+    private static String jsQuote(String t) {
+        StringBuilder sb = new StringBuilder("\"");
+        for (int i = 0; i < t.length(); i++) {
+            char c = t.charAt(i);
+            if (c == '"' || c == '\\') sb.append('\\').append(c);
+            else if (c < 32 || c > 126) sb.append(String.format("\\u%04x", (int) c));
+            else sb.append(c);
+        }
+        return sb.append('"').toString();
+    }
+
     private class TTSBridge {
         @JavascriptInterface
         public String getVoices() {
@@ -486,6 +522,34 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             } catch (Exception e) {
                 return false;
             }
+        }
+
+        @JavascriptInterface
+        public String syncStart() {
+            try {
+                if (syncServer == null) {
+                    syncServer = new SyncServer(new SyncServer.Handler() {
+                        public SyncServer.Reply handle(String method, String target, String body) { return syncForward(method, target, body); }
+                    });
+                }
+                int port = syncServer.start();
+                StringBuilder sb = new StringBuilder("{\"port\":" + port + ",\"ips\":[");
+                List<String> ips = SyncServer.localIps();
+                for (int i = 0; i < ips.size(); i++) { if (i > 0) sb.append(','); sb.append('"').append(ips.get(i)).append('"'); }
+                return sb.append("]}").toString();
+            } catch (Throwable t) { return "{}"; }
+        }
+
+        @JavascriptInterface
+        public void syncStop() { if (syncServer != null) syncServer.stop(); }
+
+        @JavascriptInterface
+        public String syncBody(int id) { String b = syncBodies.remove(id); return b == null ? "" : b; }
+
+        @JavascriptInterface
+        public void syncReply(int id, int status, String text) {
+            SyncWait w = syncWaits.get(id);
+            if (w != null) { w.status = status; w.text = text == null ? "" : text; w.latch.countDown(); }
         }
 
         @JavascriptInterface
@@ -793,6 +857,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         if (tts != null) { tts.stop(); tts.shutdown(); tts = null; }
         try { if (saveOut != null) saveOut.close(); } catch (Exception e) { }
         try { if (curImportStream != null) curImportStream.close(); } catch (Exception e) { }
+        try { if (syncServer != null) syncServer.stop(); } catch (Exception e) { }
         if (webView != null) { webView.destroy(); webView = null; }
         super.onDestroy();
     }

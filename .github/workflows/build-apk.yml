@@ -71,7 +71,7 @@ jobs:
         working-directory: apk_build
         run: |
           javac -proc:none -source 8 -target 8 -classpath "$ANDROID_JAR" -d bin/classes \
-            src/com/devise/loudreader/app/MainActivity.java src/com/devise/loudreader/app/R.java
+            src/com/devise/loudreader/app/MainActivity.java src/com/devise/loudreader/app/SyncServer.java src/com/devise/loudreader/app/R.java
           find bin/classes -name '*.class' | grep -q . || { echo "::error::no .class files produced"; exit 1; }
 
       - name: Convert to DEX (d8)

@@ -1,17 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.devise.loudreader.app"
-    android:versionCode="33"
-    android:versionName="3.6.2">
+    android:versionCode="34"
+    android:versionName="3.7.0">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33"/>
 
-    <!-- No permissions: files come through the system picker, saves go through
-         MediaStore Downloads (scoped storage), every library is bundled locally. -->
+    <!-- Files come through the system picker, saves go through MediaStore Downloads,
+         every library is bundled locally. INTERNET is only used for Wi-Fi sync between the
+         user's own devices (a small server on the local network, plus plain-HTTP requests to it). -->
+    <uses-permission android:name="android.permission.INTERNET"/>
 
     <application
         android:label="@string/app_name"
         android:allowBackup="false"
+        android:usesCleartextTraffic="true"
         android:icon="@drawable/ic_launcher"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 

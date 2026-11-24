@@ -1,5 +1,6 @@
 import Cocoa
 import WebKit
+import Network
 
 let selfTest = ProcessInfo.processInfo.environment["LR_SELFTEST"] == "1"
 
@@ -13,6 +14,7 @@ let shimJS = """
     beginSave:(name,reuse)=>post({op:'begin',name:name,reuse:!!reuse}),
     write:(id,u8)=>post({op:'write',id:id,b64:b64(u8)}),
     finish:(id)=>post({op:'finish',id:id}), abort:(id)=>post({op:'abort',id:id}), reveal:(p)=>post({op:'reveal',path:p}),
+    syncStart:()=>post({op:'syncStart'}), syncStop:()=>post({op:'syncStop'}),
     onOpenFile:(f)=>{ cb=f; while(q.length) f.apply(null,q.shift()); }};
   window.__lrOpen=async(path,name,size)=>{
     const parts=[]; const STEP=4194304;
@@ -33,7 +35,11 @@ try {
   await L.importFiles([new File(['hello world '.repeat(300)], 't.txt')], { silent: true });
   r.docs = (await L.DB.allDocs()).length;
   const res = await L.Backup.make(); r.backup = res.results.map(x => x.uri + ':' + x.size);
-  r.ok = r.app && r.desktop && r.idb === true && r.docs >= 1 && r.backup.length > 0;
+  const h = await L.Sync.startHost(); r.host = h.addrs;
+  const ping = await (await fetch('http://127.0.0.1:' + h.port + '/ping?c=' + h.code)).json(); r.ping = ping.ok;
+  const sm = await L.Sync.sync('127.0.0.1:' + h.port, h.code); r.sync = sm.peer;
+  L.Sync.stopHost();
+  r.ok = r.app && r.desktop && r.idb === true && r.docs >= 1 && r.backup.length > 0 && r.ping === true && !!r.sync;
 } catch (e) { r.err = String(e && e.message || e); r.ok = false; }
 return JSON.stringify(r);
 """
@@ -44,6 +50,104 @@ func jsStr(_ s: String) -> String {
     return String(t.dropFirst().dropLast())
 }
 
+// Small HTTP/1.1 server (text in, text out) for Wi-Fi sync. Requests are forwarded to the page's JavaScript.
+final class SyncServer {
+    private var listener: NWListener?
+    private let q = DispatchQueue(label: "lr.sync")
+    var forward: ((String, String, String, @escaping (Int, String) -> Void) -> Void)?
+
+    func start(_ done: @escaping (Int?) -> Void) {
+        stop()
+        attempt(fixed: true, done)
+    }
+
+    private func attempt(fixed: Bool, _ done: @escaping (Int?) -> Void) {
+        var l: NWListener?
+        if fixed, let p = NWEndpoint.Port(rawValue: 8765) { l = try? NWListener(using: .tcp, on: p) } else { l = try? NWListener(using: .tcp) }
+        guard let lis = l else { if fixed { attempt(fixed: false, done) } else { done(nil) }; return }
+        listener = lis
+        var fired = false
+        lis.stateUpdateHandler = { [weak self] st in
+            switch st {
+            case .ready:
+                if !fired { fired = true; done(Int(lis.port?.rawValue ?? 0)) }
+            case .failed:
+                lis.cancel()
+                if !fired { fired = true; if fixed { self?.attempt(fixed: false, done) } else { done(nil) } }
+            default: break
+            }
+        }
+        lis.newConnectionHandler = { [weak self] c in self?.accept(c) }
+        lis.start(queue: q)
+    }
+
+    func stop() { listener?.cancel(); listener = nil }
+
+    static func localIPs() -> [String] {
+        var out: [String] = []
+        var ifa: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifa) == 0, let first = ifa else { return out }
+        defer { freeifaddrs(ifa) }
+        var p: UnsafeMutablePointer<ifaddrs>? = first
+        while let cur = p {
+            let f = Int32(cur.pointee.ifa_flags)
+            if let sa = cur.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET), (f & IFF_UP) != 0, (f & IFF_LOOPBACK) == 0 {
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    let ip = String(cString: host)
+                    let parts = ip.split(separator: ".").compactMap { Int($0) }
+                    if parts.count == 4, parts[0] == 10 || (parts[0] == 172 && (16...31).contains(parts[1])) || (parts[0] == 192 && parts[1] == 168) { out.append(ip) }
+                }
+            }
+            p = cur.pointee.ifa_next
+        }
+        return out
+    }
+
+    private func accept(_ c: NWConnection) {
+        c.start(queue: q)
+        var buf = Data()
+        func more() {
+            c.receive(minimumIncompleteLength: 1, maximumLength: 262144) { [weak self] data, _, done, err in
+                guard let self = self else { c.cancel(); return }
+                if let d = data { buf.append(d) }
+                if let req = self.parse(buf) { self.handle(c, req); return }
+                if buf.count > 17 * 1024 * 1024 || done || err != nil { c.cancel(); return }
+                more()
+            }
+        }
+        more()
+    }
+
+    private func parse(_ buf: Data) -> (String, String, String)? {
+        guard let r = buf.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+        let head = String(decoding: buf[buf.startIndex..<r.lowerBound], as: UTF8.self)
+        let lines = head.components(separatedBy: "\r\n")
+        let parts = (lines.first ?? "").split(separator: " ")
+        guard parts.count >= 2 else { return ("BAD", "/", "") }
+        var len = 0
+        for l in lines.dropFirst() { let kv = l.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }; if kv.count == 2, kv[0].lowercased() == "content-length" { len = Int(kv[1]) ?? 0 } }
+        let body = buf[r.upperBound...]
+        if body.count < len { return nil }
+        return (String(parts[0]), String(parts[1]), String(decoding: body.prefix(len), as: UTF8.self))
+    }
+
+    private func handle(_ c: NWConnection, _ req: (String, String, String)) {
+        if req.0 == "OPTIONS" { respond(c, 204, ""); return }
+        if req.0 == "BAD" { respond(c, 400, ""); return }
+        guard let fwd = forward else { respond(c, 503, "{}"); return }
+        fwd(req.0, req.1, req.2) { [weak self] st, tx in self?.respond(c, st, tx) }
+    }
+
+    private func respond(_ c: NWConnection, _ status: Int, _ text: String) {
+        let b = Data(text.utf8)
+        let reason = status == 200 ? "OK" : (status == 204 ? "No Content" : "Error")
+        let head = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(b.count)\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Private-Network: true\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        var out = Data(head.utf8); out.append(b)
+        c.send(content: out, completion: .contentProcessed { _ in c.cancel() })
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply {
     var window: NSWindow!
     var web: WKWebView!
@@ -52,9 +156,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var lastDir: URL?
     var pending: [URL] = []
     var pageReady = false
+    let sync = SyncServer()
 
     func applicationDidFinishLaunching(_ n: Notification) {
         buildMenu()
+        sync.forward = { [weak self] method, target, body, reply in
+            DispatchQueue.main.async {
+                guard let self = self else { reply(503, "{}"); return }
+                self.web.callAsyncJavaScript("return await window.__lrSyncHandle(m, t, b)", arguments: ["m": method, "t": target, "b": body], in: nil, in: .page) { result in
+                    if case .success(let v) = result, let arr = v as? [Any], arr.count == 2, let st = (arr[0] as? NSNumber)?.intValue, let tx = arr[1] as? String { reply(st, tx) } else { reply(500, "{}") }
+                }
+            }
+        }
         let conf = WKWebViewConfiguration()
         let ucc = WKUserContentController()
         ucc.addUserScript(WKUserScript(source: shimJS, injectionTime: .atDocumentStart, forMainFrameOnly: true))
@@ -175,6 +288,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 saves[id] = nil; try? s.handle.close(); try? FileManager.default.removeItem(atPath: s.path)
             }
             replyHandler(true, nil)
+        case "syncStart":
+            sync.start { port in
+                DispatchQueue.main.async {
+                    guard let p = port else { replyHandler("{}", nil); return }
+                    let ips = SyncServer.localIPs().map { "\"\($0)\"" }.joined(separator: ",")
+                    replyHandler("{\"port\":\(p),\"ips\":[\(ips)]}", nil)
+                }
+            }
+        case "syncStop":
+            sync.stop(); replyHandler(true, nil)
         case "reveal":
             if let p = m["path"] as? String { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
             replyHandler(true, nil)
