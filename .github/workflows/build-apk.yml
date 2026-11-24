@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
+    paths-ignore: [ 'desktop/**', '.github/workflows/build-mac.yml' ]
 
 permissions:
   contents: write

@@ -109,10 +109,16 @@ const dlgChoose=async(title,choices)=>{ const r=await dlg({title,choices,hideOk:
 /* ---------- native bridge helpers (no-ops outside the Android wrapper) ---------- */
 const Native = {
   has: typeof AndroidBridge!=="undefined",
+  desktop: typeof DesktopBridge!=="undefined",   // macOS (Electron) build
   keepOn(on){ try{ if(this.has) AndroidBridge.setKeepScreenOn(!!on); }catch(e){} },
   // Saves a Blob. Android: chunked base64 into Downloads/LoudReader (large single bridge
   // calls fail inside the bridge itself). Browser: normal download.
   async saveBlob(name, mime, blob){
+    if(this.desktop){
+      let w; try{ w=await this.openWriter(name, mime); }catch(e){ if(e&&e.message==="__cancel__") return {ok:true, uri:null, cancelled:true}; throw e; }
+      const STEP=1024*1024; for(let o=0;o<blob.size;o+=STEP) await w.write(new Uint8Array(await blob.slice(o,Math.min(blob.size,o+STEP)).arrayBuffer()));
+      return await w.close();
+    }
     if(!this.has){
       const a=el("a"); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click();
       setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },2000); return {ok:true, uri:null};
@@ -129,7 +135,16 @@ const Native = {
     return uri ? {ok:true, uri} : {ok:false};
   },
   // Streaming writer for big files: write(Uint8Array) as often as needed, close() once. Only ~192 KB is ever buffered.
-  async openWriter(name, mime){
+  async openWriter(name, mime, reuseDir){
+    if(this.desktop){   // macOS: chunks go straight to disk through the main process
+      const id=await DesktopBridge.beginSave(name, !!reuseDir); if(id==null) throw new Error("__cancel__");
+      const CH=1024*1024, buf=new Uint8Array(CH); let fill=0;
+      return {
+        async write(u8){ let o=0; while(o<u8.length){ const n=Math.min(CH-fill,u8.length-o); buf.set(u8.subarray(o,o+n),fill); fill+=n; o+=n; if(fill===CH){ await DesktopBridge.write(id, buf.slice(0)); fill=0; } } },
+        async close(){ try{ if(fill){ await DesktopBridge.write(id, buf.slice(0,fill)); fill=0; } const path=await DesktopBridge.finish(id); return {ok:!!path, uri:path}; }catch(e){ return {ok:false}; } },
+        abort(){ try{ DesktopBridge.abort(id); }catch(e){} }
+      };
+    }
     if(!this.has){
       const parts=[]; return { async write(u8){ parts.push(u8.slice ? u8.slice() : new Uint8Array(u8)); }, async close(){ const blob=new Blob(parts,{type:mime}); this.blob=blob; const a=el("a"); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },2000); return {ok:true, uri:null}; } };
     }
@@ -146,7 +161,7 @@ const Native = {
       abort(){ try{ AndroidBridge.abortSave(); }catch(e){} }
     };
   },
-  open(uri, mime){ try{ return this.has && AndroidBridge.openUri(uri, mime); }catch(e){ return false; } },
+  open(uri, mime){ try{ if(this.desktop){ DesktopBridge.reveal(uri); return true; } return this.has && AndroidBridge.openUri(uri, mime); }catch(e){ return false; } },
   // Lets the user import a whole folder (with subfolders) from the device.
   // Resolves to an array of {id,name,path,size} (path includes the picked
   // folder's own name as its first segment, matching webkitRelativePath's
@@ -1781,7 +1796,7 @@ const Backup = {
     const created=Date.now(), results=[]; let part=0, z=null, sink=null, docs=[], done=0, books=0, bytes=0, total=0;
     for(const d of await DB.allDocs()) total+=d.size||0;
     const fname=()=>"LoudReader-backup-"+stamp+(part>1?"-part"+part:"")+".lrbackup";
-    const open=async()=>{ part++; sink=await Native.openWriter(fname(),"application/octet-stream"); if(!sink) throw new Error("Couldn't create the backup file. Check free storage."); z=new ZipOut(sink); docs=[]; };
+    const open=async()=>{ part++; sink=await Native.openWriter(fname(),"application/octet-stream", part>1); if(!sink) throw new Error("Couldn't create the backup file. Check free storage."); z=new ZipOut(sink); docs=[]; };
     const close=async(first)=>{
       const data={format:this.FORMAT, version:this.VER, created, part, docs,
         meta:first?await DB.getAllOf("meta"):[], annotations:first?await DB.getAllOf("annotations"):[], ink:first?await DB.getAllOf("ink"):[]};
@@ -1808,8 +1823,8 @@ const Backup = {
     if(this._busy) return; this._busy=true;
     try{
       const r=await this.make(); setStatus("");
-      await dlgAlert("Backup saved", r.books+" book"+(r.books===1?"":"s")+", "+r.notes+" highlight/note"+(r.notes===1?"":"s")+" and your settings ("+(r.size/1048576).toFixed(1)+" MB)"+(Native.has?" saved to Downloads/LoudReader":"")+(r.results.length>1?" in "+r.results.length+" files — keep them together; when restoring, select all of them at once.":"."));
-    }catch(e){ setStatus(""); await dlgAlert("Backup failed",String(e&&e.message||e)); }
+      await dlgAlert("Backup saved", r.books+" book"+(r.books===1?"":"s")+", "+r.notes+" highlight/note"+(r.notes===1?"":"s")+" and your settings ("+(r.size/1048576).toFixed(1)+" MB)"+(Native.has?" saved to Downloads/LoudReader":(Native.desktop&&r.results[0]&&r.results[0].uri?" saved to "+r.results[0].uri:""))+(r.results.length>1?" in "+r.results.length+" files — keep them together; when restoring, select all of them at once.":"."));
+    }catch(e){ setStatus(""); if(!(e&&e.message==="__cancel__")) await dlgAlert("Backup failed",String(e&&e.message||e)); }
     finally{ this._busy=false; }
   },
   restorePick(){ closeMoreMenu(); const inp=$("#backupInput"); inp.value=""; inp.click(); },
@@ -3388,6 +3403,10 @@ setInterval(()=>{ if(Speech.playing&&speechSynthesis.speaking&&!speechSynthesis.
 Shelf.show(false);
 window.addEventListener("pagehide",()=>{ try{ saveProgress(true); }catch(e){} });
 
+if(Native.desktop){   // files opened from Finder ("Open With", double-click) or dropped on the Dock icon
+  DesktopBridge.onOpenFile(async(name,bytes)=>{ try{ await importFiles([new File([bytes],name)],{silent:false}); }catch(e){} });
+  document.documentElement.classList.add("desktop");
+}
 window.__LoudReader = { zipOpen, ensureZip, setMaxPart:(n)=>{MAX_PART=n;}, UI, Backup, GSearch, Dict, Theme, Pager, Reading, Settings, Follow, Reader, Speech, DB, UI, OCR, Shelf, Native, Annot, openDoc, importFiles, parseDoc, dlg };
 } /* end appInit */
 </script>

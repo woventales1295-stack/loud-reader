@@ -1,0 +1,44 @@
+name: Build Loud Reader for macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths: [ 'desktop/**', 'src/**', 'tools/**', '.github/workflows/build-mac.yml' ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: Assemble the app page from src/
+        run: |
+          mkdir -p desktop/app
+          python3 tools/build_html.py desktop/app/index.html
+          ls -l desktop/app/index.html
+      - name: Install Electron + builder
+        working-directory: desktop
+        run: npm install --no-audit --no-fund
+      - name: Build universal (Apple silicon + Intel) app
+        working-directory: desktop
+        run: npx electron-builder --mac --universal
+      - name: List output
+        run: ls -lh desktop/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LoudReader-macOS
+          path: |
+            desktop/dist/*.dmg
+            desktop/dist/*.zip
+      - name: Publish as a release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          V=$(node -p "require('./desktop/package.json').version")
+          gh release create "mac-v$V" desktop/dist/*.dmg desktop/dist/*.zip --title "Loud Reader $V for macOS" --notes "Unsigned build: on first launch right-click the app, choose Open, then Open again." || gh release upload "mac-v$V" desktop/dist/*.dmg desktop/dist/*.zip --clobber

@@ -1,3 +1,6 @@
 apk_build/bin/
 apk_build/assets/
 *.keystore
+desktop/node_modules/
+desktop/dist/
+desktop/app/

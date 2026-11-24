@@ -1,0 +1,31 @@
+{
+  "name": "loud-reader-desktop",
+  "productName": "Loud Reader",
+  "version": "3.6.2",
+  "description": "Loud Reader — offline book reader with read-aloud, for macOS",
+  "main": "main.js",
+  "author": "Devise",
+  "license": "UNLICENSED",
+  "scripts": { "start": "electron .", "dist": "electron-builder --mac" },
+  "devDependencies": { "electron": "33.2.1", "electron-builder": "25.1.8" },
+  "build": {
+    "appId": "com.devise.loudreader.desktop",
+    "productName": "Loud Reader",
+    "files": ["main.js", "preload.js", "app/**/*", "package.json"],
+    "directories": { "buildResources": "build", "output": "dist" },
+    "afterPack": "./afterPack.js",
+    "mac": {
+      "category": "public.app-category.books",
+      "icon": "build/icon.png",
+      "identity": null,
+      "target": [ { "target": "dmg", "arch": ["universal"] }, { "target": "zip", "arch": ["universal"] } ],
+      "fileAssociations": [
+        { "ext": "epub", "name": "EPUB book", "role": "Viewer" }, { "ext": "pdf", "name": "PDF", "role": "Viewer" },
+        { "ext": "txt", "name": "Text", "role": "Viewer" }, { "ext": "cbz", "name": "Comic (CBZ)", "role": "Viewer" },
+        { "ext": "cbr", "name": "Comic (CBR)", "role": "Viewer" }, { "ext": "docx", "name": "Word document", "role": "Viewer" },
+        { "ext": "mobi", "name": "MOBI book", "role": "Viewer" }, { "ext": "fb2", "name": "FB2 book", "role": "Viewer" }
+      ]
+    },
+    "dmg": { "title": "Loud Reader" }
+  }
+}
