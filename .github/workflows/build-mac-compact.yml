@@ -23,7 +23,11 @@ jobs:
       - name: Self-test (launch the real app, check storage / import / backup)
         run: |
           APPBIN="desktop-swift/build/Loud Reader.app/Contents/MacOS/LoudReader"
-          LR_SELFTEST=1 perl -e 'alarm 160; exec @ARGV' "$APPBIN" | tee selftest.log
+          set +e
+          LR_SELFTEST=1 perl -e 'alarm 160; exec @ARGV' "$APPBIN" > selftest.log 2>&1
+          echo "exit code: $?"
+          cat selftest.log | head -60
+          ls ~/Library/Logs/DiagnosticReports 2>/dev/null | tail -3
           grep -q '"ok":true' selftest.log
       - uses: actions/upload-artifact@v4
         with:
