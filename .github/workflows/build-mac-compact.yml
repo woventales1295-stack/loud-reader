@@ -24,9 +24,11 @@ jobs:
         run: |
           APPBIN="desktop-swift/build/Loud Reader.app/Contents/MacOS/LoudReader"
           set +e
-          LR_SELFTEST=1 perl -e 'alarm 160; exec @ARGV' "$APPBIN" > selftest.log 2>&1
+          APPDIR="$PWD/desktop-swift/build/Loud Reader.app"
+          : > "$PWD/selftest.log"
+          perl -e 'alarm 170; exec @ARGV' open -n -W --env LR_SELFTEST=1 --stdout "$PWD/selftest.log" --stderr "$PWD/selftest.log" "$APPDIR"
           echo "exit code: $?"
-          cat selftest.log | head -60
+          head -60 selftest.log
           ls ~/Library/Logs/DiagnosticReports 2>/dev/null | tail -3
           grep -q '"ok":true' selftest.log
       - uses: actions/upload-artifact@v4
