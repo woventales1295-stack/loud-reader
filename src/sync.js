@@ -93,20 +93,26 @@ const Sync = (() => {
 
   /* ----- native server control ----- */
   function newCode(){ const a=new Uint32Array(1); (crypto.getRandomValues?crypto.getRandomValues(a):(a[0]=Math.random()*4294967295)); return String(100000+(a[0]%900000)); }
-  async function startHost(){
+  async function startHost(kind){
+    if(kind==="bt"){
+      const r=await Native.btStart(); if(!r||r.error||!r.ok) throw new Error((r&&r.error)||"Couldn't start Bluetooth sync.");
+      hosting=true; code=newCode(); bad=0; Native.keepOn(true);
+      return {code, addrs:["Bluetooth: this device shows up as “"+(r.name||"this device")+"”"], bt:true};
+    }
     const r=await Native.syncStart(); if(!r||!r.port) throw new Error("Couldn't start the sync listener on this device.");
     hostInfo=r; hosting=true; code=newCode(); bad=0; Native.keepOn(true);
     return {code, addrs:(r.ips&&r.ips.length?r.ips:["(no Wi-Fi address found)"]).map(ip=>ip+":"+r.port), port:r.port};
   }
-  function stopHost(){ hosting=false; code=null; hostInfo=null; bad=0; for(const k in incoming) delete incoming[k]; bookCache={id:null,blob:null}; try{ Native.syncStop(); }catch(e){} Native.keepOn(false); if(onHostActivity) onHostActivity("stopped"); }
+  function stopHost(){ hosting=false; code=null; hostInfo=null; bad=0; for(const k in incoming) delete incoming[k]; bookCache={id:null,blob:null}; try{ Native.syncStop(); Native.btStop(); }catch(e){} Native.keepOn(false); if(onHostActivity) onHostActivity("stopped"); }
 
   /* ----- client side ----- */
   let transport=async(addr,method,target,body)=>{
+    if(addr.indexOf("bt:")===0) return Native.btRequest(addr.slice(3),method,target,body);
     const ac=new AbortController(), to=setTimeout(()=>ac.abort(),120000);
     try{ const r=await fetch("http://"+addr+target,{method,body:method==="POST"?body:undefined,headers:method==="POST"?{"Content-Type":"text/plain"}:undefined,signal:ac.signal,cache:"no-store"}); return {status:r.status,text:await r.text()}; }
     finally{ clearTimeout(to); }
   };
-  function normAddr(a){ a=String(a||"").trim().replace(/^https?:\/\//i,"").replace(/\/.*$/,""); if(!a) return ""; return /:\d+$/.test(a)?a:a+":"+PORT_HINT; }
+  function normAddr(a){ a=String(a||"").trim(); if(/^bt:/i.test(a)) return "bt:"+a.slice(3).trim(); a=a.replace(/^https?:\/\//i,"").replace(/\/.*$/,""); if(!a) return ""; return /:\d+$/.test(a)?a:a+":"+PORT_HINT; }
   async function sync(addrIn,codeIn,progress,choose){
     if(running) throw new Error("A sync is already running."); running=true;
     const say=(m,f)=>{ try{ progress&&progress(m,f); }catch(e){} };
@@ -114,7 +120,7 @@ const Sync = (() => {
       const addr=normAddr(addrIn), c=String(codeIn||"").trim(); if(!addr) throw new Error("Enter the other device's address."); if(!/^\d{6}$/.test(c)) throw new Error("The code is 6 digits.");
       const call=async(method,path,params,body)=>{
         const qs="?c="+c+Object.keys(params||{}).map(k=>"&"+k+"="+encodeURIComponent(params[k])).join("");
-        let r; try{ r=await transport(addr,method,path+qs,body); }catch(e){ throw new Error("Couldn't reach "+addr+". Both devices must be on the same Wi-Fi, and the other one must be showing its sync code."); }
+        let r; try{ r=await transport(addr,method,path+qs,body); }catch(e){ if(addr.indexOf("bt:")===0) throw new Error("Bluetooth: "+String(e&&e.message||e)+". Pair the devices first, and on the phone tap “Wait over Bluetooth”."); throw new Error("Couldn't reach "+addr+". Both devices must be on the same Wi-Fi, and the other one must be showing its sync code."); }
         if(r.status===403) throw new Error("That code isn't right. Check the code shown on the other device.");
         if(r.status===503) throw new Error("The other device isn't waiting for a sync. Tap \"Show my sync code\" there first.");
         if(r.status!==200){ let m=""; try{ m=JSON.parse(r.text).error; }catch(e){} throw new Error("The other device reported an error"+(m?": "+m:"")+"."); }
@@ -162,12 +168,12 @@ const Sync = (() => {
       try{ await DB.setMeta(SETS,{syncPeer:addr,lastSync:Date.now()}); }catch(e){}
       try{ Shelf.render(); }catch(e){}
       say("Done",1); return sum;
-    } finally{ running=false; }
+    } finally{ running=false; try{ if(String(addrIn||"").trim().toLowerCase().indexOf("bt:")===0) Native.btClose(); }catch(e){} }
   }
 
   return {
     deviceName(){ return Native.desktop?"Mac":(Native.has?"Android":"Browser"); },
-    available(){ return Native.has||Native.desktop; },
+    available(){ return Native.has||Native.desktop; }, btHost(){ return Native.has; }, btClient(){ return Native.desktop; },
     startHost, stopHost, sync, handle, localState, need, apply, normAddr,
     isHosting:()=>hosting, setActivity(fn){ onHostActivity=fn; },
     _test:{ setCode(c){ code=c; hosting=true; }, setTransport(fn){ transport=fn; }, fromB64, toB64 }
@@ -194,6 +200,7 @@ window.__lrSyncDispatch=async(id,method,target)=>{ let r; try{ r=await Sync.hand
     closeMoreMenu(); modal.hidden=false; setSt("",0);
     if(!Sync.available()){ $("#syncBody").hidden=true; $("#syncNone").hidden=false; return; }
     $("#syncBody").hidden=false; $("#syncNone").hidden=true;
+    $("#syncBtHostBtn").hidden=!Sync.btHost(); $("#syncBtRow").hidden=!Sync.btClient(); if(Sync.btClient()) fillBt();
     try{ const m=await DB.getMeta("__settings__"); if(m&&m.syncPeer&&!$("#syncAddrIn").value) $("#syncAddrIn").value=m.syncPeer; if(m&&m.lastSync) setSt("Last synced "+new Date(m.lastSync).toLocaleString()+(m.syncPeer?" with "+m.syncPeer:"")); }catch(e){}
   }
   function close(){ if(Sync.isHosting()) Sync.stopHost(); modal.hidden=true; }
@@ -204,6 +211,18 @@ window.__lrSyncDispatch=async(id,method,target)=>{ let r; try{ r=await Sync.hand
     try{ const r=await Sync.startHost(); $("#syncAddr").textContent=r.addrs.join("\n"); $("#syncCode").textContent=r.code; $("#syncHostOn").hidden=false; $("#syncHostOff").hidden=true; setSt("Waiting for the other device… keep this window open."); }
     catch(e){ setSt(String(e&&e.message||e)); } finally{ hostBusy=false; }
   };
+  $("#syncBtHostBtn").onclick=async()=>{
+    if(hostBusy) return; hostBusy=true;
+    try{ const r=await Sync.startHost("bt"); $("#syncAddr").textContent=r.addrs.join("\n"); $("#syncCode").textContent=r.code; $("#syncHostOn").hidden=false; $("#syncHostOff").hidden=true; setSt("Waiting for your Mac… it must already be paired with this phone. Keep this window open."); }
+    catch(e){ setSt(String(e&&e.message||e)); } finally{ hostBusy=false; }
+  };
+  async function fillBt(){
+    const sel=$("#syncBtSel"); sel.innerHTML=""; const o0=el("option"); o0.value=""; o0.textContent="Choose a paired phone…"; sel.appendChild(o0);
+    const list=await Native.btList(); list.forEach(d=>{ const o=el("option"); o.value=d.addr; o.textContent=d.name||d.addr; sel.appendChild(o); });
+    if(!list.length) setSt("No paired Bluetooth devices found. Pair your phone in System Settings › Bluetooth first.");
+  }
+  $("#syncBtSel").onchange=(e)=>{ if(e.target.value) $("#syncAddrIn").value="bt:"+e.target.value; };
+  $("#syncBtRefresh").onclick=fillBt;
   $("#syncHostStop").onclick=()=>{ Sync.stopHost(); setSt(""); };
   const fmt=(n)=>n>=1048576?(n/1048576).toFixed(1)+" MB":Math.max(1,Math.round(n/1024))+" KB";
   function choose(plan){

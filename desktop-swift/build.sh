@@ -2,11 +2,11 @@
 # Builds a small universal macOS app: a native window around the system WebKit (no bundled browser).
 set -euo pipefail
 cd "$(dirname "$0")"
-VERSION="${1:-3.7.1}"
+VERSION="${1:-3.8.0}"
 APP="build/Loud Reader.app"
 rm -rf build && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/app"
-swiftc -O -target arm64-apple-macos11.0 main.swift -o build/lr-arm64 -framework Cocoa -framework WebKit
-swiftc -O -target x86_64-apple-macos11.0 main.swift -o build/lr-x64 -framework Cocoa -framework WebKit
+swiftc -O -target arm64-apple-macos11.0 main.swift -o build/lr-arm64 -framework Cocoa -framework WebKit -framework IOBluetooth
+swiftc -O -target x86_64-apple-macos11.0 main.swift -o build/lr-x64 -framework Cocoa -framework WebKit -framework IOBluetooth
 lipo -create build/lr-arm64 build/lr-x64 -output "$APP/Contents/MacOS/LoudReader"
 cp app/index.html "$APP/Contents/Resources/app/index.html"
 sed "s/__VERSION__/$VERSION/g" Info.plist > "$APP/Contents/Info.plist"

@@ -272,6 +272,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
 
     private static class SyncWait { final CountDownLatch latch = new CountDownLatch(1); int status = 504; String text = "{\"error\":\"timed out\"}"; }
     private SyncServer syncServer;
+    private BtServer btServer;
     private final AtomicInteger syncSeq = new AtomicInteger();
     private final ConcurrentHashMap<Integer, SyncWait> syncWaits = new ConcurrentHashMap<Integer, SyncWait>();
     private final ConcurrentHashMap<Integer, String> syncBodies = new ConcurrentHashMap<Integer, String>();
@@ -542,6 +543,29 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
 
         @JavascriptInterface
         public void syncStop() { if (syncServer != null) syncServer.stop(); }
+
+        @JavascriptInterface
+        public String btStart() {
+            try {
+                if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission("android.permission.BLUETOOTH_CONNECT") != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    runOnUiThread(new Runnable() { public void run() { requestPermissions(new String[] { "android.permission.BLUETOOTH_CONNECT" }, 77); } });
+                    return "{\"need\":\"permission\"}";
+                }
+                if (btServer == null) {
+                    btServer = new BtServer(new SyncServer.Handler() {
+                        public SyncServer.Reply handle(String method, String target, String body) { return syncForward(method, target, body); }
+                    });
+                }
+                String name = btServer.start();
+                return "{\"ok\":true,\"name\":" + jsQuote(name) + "}";
+            } catch (Throwable t) {
+                String m = t.getMessage() == null ? "Couldn't start Bluetooth." : t.getMessage();
+                return "{\"error\":" + jsQuote(m) + "}";
+            }
+        }
+
+        @JavascriptInterface
+        public void btStop() { if (btServer != null) btServer.stop(); }
 
         @JavascriptInterface
         public String syncBody(int id) { String b = syncBodies.remove(id); return b == null ? "" : b; }
@@ -847,6 +871,15 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     }
 
     @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 77) {
+            boolean ok = grantResults.length > 0 && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            evalJs("window.__lrBtPerm&&window.__lrBtPerm(" + ok + ")");
+        }
+    }
+
+    @Override
     protected void onPause() {
         super.onPause();
         if (webView != null) webView.onPause();
@@ -858,6 +891,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         try { if (saveOut != null) saveOut.close(); } catch (Exception e) { }
         try { if (curImportStream != null) curImportStream.close(); } catch (Exception e) { }
         try { if (syncServer != null) syncServer.stop(); } catch (Exception e) { }
+        try { if (btServer != null) btServer.stop(); } catch (Exception e) { }
         if (webView != null) { webView.destroy(); webView = null; }
         super.onDestroy();
     }

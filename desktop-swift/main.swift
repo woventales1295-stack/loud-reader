@@ -1,6 +1,7 @@
 import Cocoa
 import WebKit
 import Network
+import IOBluetooth
 
 let selfTest = ProcessInfo.processInfo.environment["LR_SELFTEST"] == "1"
 
@@ -14,6 +15,7 @@ let shimJS = """
     beginSave:(name,reuse)=>post({op:'begin',name:name,reuse:!!reuse}),
     write:(id,u8)=>post({op:'write',id:id,b64:b64(u8)}),
     finish:(id)=>post({op:'finish',id:id}), abort:(id)=>post({op:'abort',id:id}), reveal:(p)=>post({op:'reveal',path:p}),
+    btList:()=>post({op:'btList'}), btRequest:(a,m,t,b)=>post({op:'btRequest',addr:a,m:m,t:t,b:b}), btClose:()=>post({op:'btClose'}),
     syncStart:()=>post({op:'syncStart'}), syncStop:()=>post({op:'syncStop'}),
     onOpenFile:(f)=>{ cb=f; while(q.length) f.apply(null,q.shift()); }};
   window.__lrOpen=async(path,name,size)=>{
@@ -148,6 +150,108 @@ final class SyncServer {
     }
 }
 
+// Bluetooth (classic RFCOMM) client: talks to the phone's "Loud Reader Sync" service with length-prefixed JSON frames.
+final class BTLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
+    static let uuid: [UInt8] = [0x5a,0x1a,0x3f,0x0e,0x6c,0x0b,0x4f,0x6e,0x9d,0x27,0x4c,0x6f,0x75,0x64,0x52,0x64]
+    var addr = ""
+    private var device: IOBluetoothDevice?
+    private var channel: IOBluetoothRFCOMMChannel?
+    private var onOpen: ((String?) -> Void)?
+    private var pending: ((Int, String, String?) -> Void)?
+    private var buf = Data()
+    private let lock = NSLock()
+    private let writeQ = DispatchQueue(label: "lr.bt.write")
+    var isOpen: Bool { channel != nil && (channel?.isOpen() ?? false) }
+
+    static func paired() -> [[String: String]] {
+        let devs = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+        return devs.map { ["name": $0.name ?? "Unknown device", "addr": $0.addressString ?? ""] }
+    }
+
+    func connect(_ address: String, _ done: @escaping (String?) -> Void) {
+        close()
+        addr = address
+        guard let dev = IOBluetoothDevice(addressString: address) else { done("That Bluetooth device wasn't found."); return }
+        device = dev
+        onOpen = done
+        if dev.performSDPQuery(self) != kIOReturnSuccess { finishOpen("Couldn't start talking to the phone over Bluetooth.") }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in self?.finishOpen("Timed out connecting. Is \"Wait over Bluetooth\" showing on the phone?") }
+    }
+
+    private func finishOpen(_ err: String?) {
+        guard let cb = onOpen else { return }
+        onOpen = nil
+        cb(err)
+    }
+
+    @objc func sdpQueryComplete(_ dev: IOBluetoothDevice!, status: IOReturn) {
+        guard status == kIOReturnSuccess else { finishOpen("The phone doesn't offer the Loud Reader sync service. On the phone, tap \"Wait over Bluetooth\" first."); return }
+        let u = BTLink.uuid.withUnsafeBytes { IOBluetoothSDPUUID(bytes: $0.baseAddress, length: 16) }
+        guard let rec = dev.getServiceRecord(for: u) else { finishOpen("The phone isn't waiting for a sync. On the phone, tap \"Wait over Bluetooth\"."); return }
+        var cid: BluetoothRFCOMMChannelID = 0
+        guard rec.getRFCOMMChannelID(&cid) == kIOReturnSuccess else { finishOpen("Couldn't find the sync channel on the phone."); return }
+        var ch: IOBluetoothRFCOMMChannel?
+        if dev.openRFCOMMChannelAsync(&ch, withChannelID: cid, delegate: self) != kIOReturnSuccess { finishOpen("Couldn't open the Bluetooth channel."); return }
+        channel = ch
+    }
+
+    func rfcommChannelOpenComplete(_ rfcommChannel: IOBluetoothRFCOMMChannel!, status error: IOReturn) {
+        finishOpen(error == kIOReturnSuccess ? nil : "Bluetooth connection failed (is the phone paired with this Mac?).")
+    }
+
+    func rfcommChannelClosed(_ rfcommChannel: IOBluetoothRFCOMMChannel!) {
+        channel = nil
+        if let p = pending { pending = nil; p(0, "", "The Bluetooth connection closed.") }
+    }
+
+    func rfcommChannelData(_ rfcommChannel: IOBluetoothRFCOMMChannel!, data dataPointer: UnsafeMutableRawPointer!, length dataLength: Int) {
+        lock.lock(); buf.append(Data(bytes: dataPointer, count: dataLength)); lock.unlock()
+        parse()
+    }
+
+    private func parse() {
+        lock.lock()
+        guard buf.count >= 4 else { lock.unlock(); return }
+        let len = Int(buf[buf.startIndex]) << 24 | Int(buf[buf.startIndex + 1]) << 16 | Int(buf[buf.startIndex + 2]) << 8 | Int(buf[buf.startIndex + 3])
+        guard buf.count >= 4 + len else { lock.unlock(); return }
+        let payload = Data(buf.subdata(in: (buf.startIndex + 4)..<(buf.startIndex + 4 + len)))
+        buf = Data(buf.dropFirst(4 + len))
+        lock.unlock()
+        var st = 500, tx = "{}"
+        if let o = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any] { st = (o["s"] as? NSNumber)?.intValue ?? 500; tx = (o["x"] as? String) ?? "{}" }
+        if let p = pending { pending = nil; p(st, tx, nil) }
+    }
+
+    func request(_ method: String, _ target: String, _ body: String, _ done: @escaping (Int, String, String?) -> Void) {
+        guard let ch = channel, ch.isOpen() else { done(0, "", "Not connected over Bluetooth."); return }
+        guard let json = try? JSONSerialization.data(withJSONObject: ["m": method, "t": target, "b": body]) else { done(0, "", "bad request"); return }
+        pending = done
+        var frame = Data()
+        var n = UInt32(json.count).bigEndian
+        withUnsafeBytes(of: &n) { frame.append(contentsOf: $0) }
+        frame.append(json)
+        let mtu = max(64, Int(ch.getMTU()))
+        writeQ.async { [weak self] in
+            var off = 0
+            while off < frame.count {
+                let end = min(frame.count, off + mtu)
+                var chunk = [UInt8](frame[off..<end])
+                if ch.writeSync(&chunk, length: UInt16(chunk.count)) != kIOReturnSuccess {
+                    DispatchQueue.main.async { if let p = self?.pending { self?.pending = nil; p(0, "", "Sending over Bluetooth failed.") } }
+                    return
+                }
+                off = end
+            }
+        }
+    }
+
+    func close() {
+        channel?.close(); channel = nil
+        device?.closeConnection(); device = nil
+        buf = Data(); pending = nil; onOpen = nil
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply {
     var window: NSWindow!
     var web: WKWebView!
@@ -157,6 +261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var pending: [URL] = []
     var pageReady = false
     let sync = SyncServer()
+    var btLink: BTLink?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         buildMenu()
@@ -298,6 +403,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             }
         case "syncStop":
             sync.stop(); replyHandler(true, nil)
+        case "btList":
+            let d = (try? JSONSerialization.data(withJSONObject: BTLink.paired())) ?? Data("[]".utf8)
+            replyHandler(String(decoding: d, as: UTF8.self), nil)
+        case "btRequest":
+            guard let addr = m["addr"] as? String, let me = m["m"] as? String, let t = m["t"] as? String else { replyHandler(nil, "bad request"); return }
+            let body = (m["b"] as? String) ?? ""
+            let go: (BTLink) -> Void = { link in
+                link.request(me, t, body) { st, tx, err in
+                    DispatchQueue.main.async { if let e = err { replyHandler(nil, e) } else { replyHandler([st, tx], nil) } }
+                }
+            }
+            if let l = btLink, l.addr == addr, l.isOpen { go(l); return }
+            let l = BTLink(); btLink = l
+            l.connect(addr) { err in
+                DispatchQueue.main.async { if let e = err { replyHandler(nil, e) } else { go(l) } }
+            }
+        case "btClose":
+            btLink?.close(); btLink = nil; replyHandler(true, nil)
         case "reveal":
             if let p = m["path"] as? String { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
             replyHandler(true, nil)

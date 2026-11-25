@@ -162,6 +162,14 @@ const Native = {
     };
   },
   async syncStart(){ try{ if(this.has) return JSON.parse(AndroidBridge.syncStart()); if(this.desktop) return JSON.parse(await DesktopBridge.syncStart()); }catch(e){} return null; },
+  async btStart(){ try{ if(!this.has) return {error:"Bluetooth hosting is only available on Android."};
+      const r=JSON.parse(AndroidBridge.btStart());
+      if(r.need==="permission") return await new Promise((res)=>{ window.__lrBtPerm=(ok)=>{ window.__lrBtPerm=null; res(ok?JSON.parse(AndroidBridge.btStart()):{error:"Bluetooth permission was denied."}); }; });
+      return r; }catch(e){ return {error:"Couldn't start Bluetooth."}; } },
+  btStop(){ try{ if(this.has) AndroidBridge.btStop(); }catch(e){} },
+  async btList(){ try{ if(this.desktop) return JSON.parse(await DesktopBridge.btList()); }catch(e){} return []; },
+  async btRequest(addr,m,t,b){ const r=await DesktopBridge.btRequest(addr,m,t,b||""); return {status:r[0],text:r[1]}; },
+  btClose(){ try{ if(this.desktop) DesktopBridge.btClose(); }catch(e){} },
   syncStop(){ try{ if(this.has) AndroidBridge.syncStop(); else if(this.desktop) DesktopBridge.syncStop(); }catch(e){} },
   open(uri, mime){ try{ if(this.desktop){ DesktopBridge.reveal(uri); return true; } return this.has && AndroidBridge.openUri(uri, mime); }catch(e){ return false; } },
   // Lets the user import a whole folder (with subfolders) from the device.

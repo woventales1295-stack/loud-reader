@@ -161,11 +161,12 @@
     <div id="syncBody">
       <div class="syncNote">Put both devices on the same Wi‑Fi and open this window on each. On one, tap “Show my sync code”; on the other, type that address and code and tap “Sync now”. Both directions are merged: reading positions, bookmarks, highlights, notes, drawings and books.</div>
       <div class="syncBox"><b>This device waits</b>
-        <div id="syncHostOff"><button id="syncHostBtn" class="btn-accent">Show my sync code</button></div>
+        <div id="syncHostOff"><button id="syncHostBtn" class="btn-accent">Show my sync code (Wi‑Fi)</button><button id="syncBtHostBtn" hidden>Wait over Bluetooth (experimental)</button></div>
         <div id="syncHostOn" hidden><div id="syncAddr" class="syncBig"></div><div>Code: <span id="syncCode" class="syncBig"></span></div><button id="syncHostStop">Stop</button></div>
       </div>
       <div class="syncBox"><b>This device connects</b>
-        <input id="syncAddrIn" placeholder="Address, e.g. 192.168.1.5:8765" autocapitalize="off" autocomplete="off" spellcheck="false" />
+        <div id="syncBtRow" hidden><select id="syncBtSel"></select><button id="syncBtRefresh">Refresh</button> <span class="syncNote">Bluetooth (experimental): pick the paired phone, then enter the code it shows.</span></div>
+        <input id="syncAddrIn" placeholder="Wi‑Fi address, e.g. 192.168.1.5:8765" autocapitalize="off" autocomplete="off" spellcheck="false" />
         <input id="syncCodeIn" placeholder="6-digit code" inputmode="numeric" maxlength="6" autocomplete="off" />
         <button id="syncGo" class="btn-accent">Sync now</button>
       </div>
