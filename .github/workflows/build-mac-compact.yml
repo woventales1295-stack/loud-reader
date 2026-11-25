@@ -19,7 +19,7 @@ jobs:
           mkdir -p desktop-swift/app
           python3 tools/build_html.py desktop-swift/app/index.html
       - name: Build app + dmg + zip
-        run: ./desktop-swift/build.sh 3.7.0
+        run: ./desktop-swift/build.sh 3.7.1
       - name: Self-test (launch the real app, check storage / import / backup)
         run: |
           APPBIN="desktop-swift/build/Loud Reader.app/Contents/MacOS/LoudReader"
@@ -40,4 +40,4 @@ jobs:
       - name: Publish as a release
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          gh release create "mac-compact-v3.7.0" desktop-swift/build/*.dmg desktop-swift/build/*.zip --title "Loud Reader 3.7.0 for macOS (compact)" --notes "Small build (uses the Mac's own web engine). Unsigned: on first launch right-click the app, choose Open, then Open again." || gh release upload "mac-compact-v3.7.0" desktop-swift/build/*.dmg desktop-swift/build/*.zip --clobber
+          gh release create "mac-compact-v3.7.1" desktop-swift/build/*.dmg desktop-swift/build/*.zip --title "Loud Reader 3.7.1 for macOS (compact)" --notes "Small build (uses the Mac's own web engine). Unsigned: on first launch right-click the app, choose Open, then Open again." || gh release upload "mac-compact-v3.7.1" desktop-swift/build/*.dmg desktop-swift/build/*.zip --clobber

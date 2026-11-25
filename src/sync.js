@@ -107,7 +107,7 @@ const Sync = (() => {
     finally{ clearTimeout(to); }
   };
   function normAddr(a){ a=String(a||"").trim().replace(/^https?:\/\//i,"").replace(/\/.*$/,""); if(!a) return ""; return /:\d+$/.test(a)?a:a+":"+PORT_HINT; }
-  async function sync(addrIn,codeIn,progress){
+  async function sync(addrIn,codeIn,progress,choose){
     if(running) throw new Error("A sync is already running."); running=true;
     const say=(m,f)=>{ try{ progress&&progress(m,f); }catch(e){} };
     try{
@@ -125,6 +125,20 @@ const Sync = (() => {
       say("Comparing libraries…",.05);
       const remote=await callJ("GET","/state"), local=await localState();
       const toLocal=need(remote,local), toRemote=need(local,remote);
+      if(choose){
+        const nm=(docs,id)=>{ const d=docs.find(x=>x.id===id); return {id,name:(d&&d.name)||"book",size:(d&&d.size)||0}; };
+        const plan={ peer:hi.name||"other device", incoming:toLocal.books.map(i=>nm(remote.docs,i)), outgoing:toRemote.books.map(i=>nm(local.docs,i)),
+          delIn:toLocal.delDocs.map(i=>nm(local.docs,i)), delOut:toRemote.delDocs.map(i=>nm(remote.docs,i)),
+          posIn:toLocal.meta.length, posOut:toRemote.meta.length, noteIn:toLocal.ann.length+toLocal.ink.length+toLocal.delAnn.length+toLocal.delInk.length, noteOut:toRemote.ann.length+toRemote.ink.length+toRemote.delAnn.length+toRemote.delInk.length };
+        const sel=await choose(plan); if(!sel) throw new Error("__cancel__");
+        for(const [ch,books,dels] of [[toLocal,sel.incoming,sel.delIn],[toRemote,sel.outgoing,sel.delOut]]){
+          const all=new Set(ch.books), off=new Set(ch.books.filter(i=>!books.has(i)));
+          ch.books=ch.books.filter(i=>books.has(i)); ch.delDocs=ch.delDocs.filter(i=>dels.has(i));
+          ch.meta=ch.meta.filter(m=>!off.has(m.id)); ch.ann=ch.ann.filter(a=>!off.has(a.docId)); ch.ink=ch.ink.filter(k=>!off.has(k.docId));
+          if(!sel.positions) ch.meta=[];
+          if(!sel.notes){ ch.ann=[]; ch.ink=[]; ch.delAnn=[]; ch.delInk=[]; }
+        }
+      }
       const sum={booksIn:0,booksOut:0,meta:0,notes:0,deleted:0,peer:hi.name||"other device"};
       const totalBooks=toLocal.books.length+toRemote.books.length; let doneBooks=0;
       const bookFrac=(f)=>.1+.8*((doneBooks+f)/Math.max(1,totalBooks));
@@ -191,12 +205,35 @@ window.__lrSyncDispatch=async(id,method,target)=>{ let r; try{ r=await Sync.hand
     catch(e){ setSt(String(e&&e.message||e)); } finally{ hostBusy=false; }
   };
   $("#syncHostStop").onclick=()=>{ Sync.stopHost(); setSt(""); };
+  const fmt=(n)=>n>=1048576?(n/1048576).toFixed(1)+" MB":Math.max(1,Math.round(n/1024))+" KB";
+  function choose(plan){
+    return new Promise((resolve)=>{
+      const box=$("#syncPlan"); box.innerHTML=""; const boxes=document.querySelectorAll("#syncBody .syncBox"); boxes.forEach(b=>b.hidden=true); box.hidden=false;
+      const groups=[];
+      const sec=(title,items,kind)=>{ if(!items.length) return; const h=el("div","planHead"); const t=el("b"); t.textContent=title+" ("+items.length+")"; h.appendChild(t);
+        const all=el("button","planAll"); all.textContent="None"; h.appendChild(all); box.appendChild(h); const rows=[];
+        items.forEach(it=>{ const l=el("label","planRow"); const c=el("input"); c.type="checkbox"; c.checked=true; const sp=el("span"); sp.textContent=it.name+(it.size?"  ·  "+fmt(it.size):""); l.appendChild(c); l.appendChild(sp); box.appendChild(l); rows.push([c,it.id]); });
+        all.onclick=()=>{ const on=all.textContent==="All"; rows.forEach(r=>r[0].checked=on); all.textContent=on?"None":"All"; };
+        groups.push([kind,rows]); };
+      sec("Books to receive from "+plan.peer,plan.incoming,"incoming"); sec("Books to send to "+plan.peer,plan.outgoing,"outgoing");
+      sec("Books to remove here (deleted on "+plan.peer+")",plan.delIn,"delIn"); sec("Books to remove on "+plan.peer+" (deleted here)",plan.delOut,"delOut");
+      const opt=(label,n,m)=>{ const l=el("label","planRow"); const c=el("input"); c.type="checkbox"; c.checked=true; const sp=el("span"); sp.textContent=label+" — "+n+" in, "+m+" out"; l.appendChild(c); l.appendChild(sp); box.appendChild(l); return c; };
+      const hh=el("div","planHead"); const tt=el("b"); tt.textContent="Also merge"; hh.appendChild(tt); box.appendChild(hh);
+      const cp=opt("Reading positions, finished & bookmarks",plan.posIn,plan.posOut), cn=opt("Highlights, notes & drawings",plan.noteIn,plan.noteOut);
+      const act=el("div","modalActions"); const cancel=el("button"); cancel.textContent="Cancel"; const go=el("button","btn-accent"); go.textContent="Sync selected"; act.appendChild(cancel); act.appendChild(el("span","grow")); act.appendChild(go); box.appendChild(act);
+      const done=(v)=>{ box.hidden=true; box.innerHTML=""; boxes.forEach(b=>b.hidden=false); resolve(v); };
+      cancel.onclick=()=>done(null);
+      go.onclick=()=>{ const sel={incoming:new Set(),outgoing:new Set(),delIn:new Set(),delOut:new Set(),positions:cp.checked,notes:cn.checked}; groups.forEach(g=>g[1].forEach(r=>{ if(r[0].checked) sel[g[0]].add(r[1]); })); done(sel); };
+      if(!plan.incoming.length&&!plan.outgoing.length&&!plan.delIn.length&&!plan.delOut.length&&!plan.posIn&&!plan.posOut&&!plan.noteIn&&!plan.noteOut){ done({incoming:new Set(),outgoing:new Set(),delIn:new Set(),delOut:new Set(),positions:true,notes:true}); }
+      else setSt("Choose what to sync.",.1);
+    });
+  }
   $("#syncGo").onclick=async()=>{
     const b=$("#syncGo"); b.disabled=true;
-    try{ const s=await Sync.sync($("#syncAddrIn").value,$("#syncCodeIn").value,setSt);
+    try{ const s=await Sync.sync($("#syncAddrIn").value,$("#syncCodeIn").value,setSt,choose);
       const bits=[]; if(s.booksIn) bits.push(s.booksIn+" book"+(s.booksIn>1?"s":"")+" received"); if(s.booksOut) bits.push(s.booksOut+" sent"); if(s.meta) bits.push(s.meta+" position/bookmark update"+(s.meta>1?"s":"")); if(s.notes) bits.push(s.notes+" highlight/note change"+(s.notes>1?"s":"")); if(s.deleted) bits.push(s.deleted+" removed");
       setSt("Synced with "+s.peer+(bits.length?": "+bits.join(", ")+".":" — everything was already up to date."),1);
-    }catch(e){ setSt(String(e&&e.message||e),0); }
+    }catch(e){ setSt(e&&e.message==="__cancel__"?"Sync cancelled — nothing was changed.":String(e&&e.message||e),0); }
     finally{ b.disabled=false; }
   };
 })();

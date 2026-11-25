@@ -2,7 +2,7 @@
 # Builds a small universal macOS app: a native window around the system WebKit (no bundled browser).
 set -euo pipefail
 cd "$(dirname "$0")"
-VERSION="${1:-3.7.0}"
+VERSION="${1:-3.7.1}"
 APP="build/Loud Reader.app"
 rm -rf build && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/app"
 swiftc -O -target arm64-apple-macos11.0 main.swift -o build/lr-arm64 -framework Cocoa -framework WebKit
