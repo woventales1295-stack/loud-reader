@@ -2,8 +2,8 @@
 # Builds a small universal macOS app: a native window around the system WebKit (no bundled browser).
 set -euo pipefail
 cd "$(dirname "$0")"
-VERSION="${1:-3.8.0}"
-APP="build/Loud Reader.app"
+VERSION="${1:-3.8.1}"
+APP="build/BuX.app"
 rm -rf build && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/app"
 swiftc -O -target arm64-apple-macos11.0 main.swift -o build/lr-arm64 -framework Cocoa -framework WebKit -framework IOBluetooth
 swiftc -O -target x86_64-apple-macos11.0 main.swift -o build/lr-x64 -framework Cocoa -framework WebKit -framework IOBluetooth
@@ -18,6 +18,6 @@ done
 iconutil -c icns build/icon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "$APP"
 mkdir -p build/stage && cp -R "$APP" build/stage/ && ln -s /Applications build/stage/Applications
-hdiutil create -volname "Loud Reader" -srcfolder build/stage -ov -format UDZO "build/LoudReader-$VERSION-macOS.dmg"
-ditto -c -k --keepParent "$APP" "build/LoudReader-$VERSION-macOS.zip"
+hdiutil create -volname "BuX" -srcfolder build/stage -ov -format UDZO "build/BuX-$VERSION-macOS.dmg"
+ditto -c -k --keepParent "$APP" "build/BuX-$VERSION-macOS.zip"
 ls -lh build/*.dmg build/*.zip

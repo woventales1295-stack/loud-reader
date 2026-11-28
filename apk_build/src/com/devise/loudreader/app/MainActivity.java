@@ -465,7 +465,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             try {
                 android.content.ClipboardManager cm =
                     (android.content.ClipboardManager) getSystemService(android.content.Context.CLIPBOARD_SERVICE);
-                cm.setPrimaryClip(android.content.ClipData.newPlainText("Loud Reader", text));
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("BuX", text));
                 return true;
             } catch (Exception e) {
                 return false;

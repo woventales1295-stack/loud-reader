@@ -1562,8 +1562,7 @@ function clearPageCanvas(wrapper){
   // simultaneously and crash the WebView. The wrapper's height is already
   // reserved via padding-top (set from the page's aspect ratio before any
   // rendering happens), so clearing the canvas doesn't shift scroll position.
-  const canvas = wrapper.querySelector("canvas");
-  if (canvas){ canvas.width=0; canvas.height=0; }
+  wrapper.querySelectorAll("canvas").forEach(c=>{ c.width=0; c.height=0; });   // the page and its drawing layer
   wrapper.querySelectorAll(".pdfannot:not(.sel-preview-pdf)").forEach(n=>n.remove());
   wrapper.dataset.rendered="0";
 }
@@ -1853,9 +1852,9 @@ const Backup = {
         let Z=await zipOpen(file), readText, getBlob;
         if(Z){ readText=(n)=>Z.text(n); getBlob=(n)=>Z.blob(n); }
         else { await ensureZip(); const zip=await JSZip.loadAsync(file); readText=async(n)=>{ const f=zip.file(n); return f?await f.async("string"):null; }; getBlob=async(n)=>{ const f=zip.file(n); return f?await f.async("blob"):null; }; }
-        const jt=await readText("data.json"); if(!jt) throw new Error("\""+file.name+"\" isn't a Loud Reader backup file.");
+        const jt=await readText("data.json"); if(!jt) throw new Error("\""+file.name+"\" isn't a BuX backup file.");
         const data=JSON.parse(jt);
-        if(data.format!==this.FORMAT) throw new Error("\""+file.name+"\" isn't a Loud Reader backup file.");
+        if(data.format!==this.FORMAT) throw new Error("\""+file.name+"\" isn't a BuX backup file.");
         if(data.version>this.VER) throw new Error("This backup was made by a newer version of the app. Update the app first.");
         if(!mode){
           mode=await dlgChoose("Restore from backup"+(files.length>1?" ("+files.length+" files)":"")+" — "+data.docs.length+" book"+(data.docs.length===1?"":"s")+(files.length>1?" in the first file":""),[
@@ -3155,8 +3154,9 @@ const Ink = {
       $("#inkWidth").value=this.width;
     }
     Object.keys(Reader.pageWrappers||{}).forEach(p=>{
-      const c=Reader.pageWrappers[p].querySelector(".inkcanvas");
+      const w=Reader.pageWrappers[p], c=w.querySelector(".inkcanvas");
       if(c) c.style.pointerEvents = this.active ? "auto" : "none";
+      if(w.dataset.rendered==="1") this.redrawPage(w, Number(p));   // allocate (on) or free (off) the drawing layer
     });
     if(!this.active) this._drawing=null;
   },
@@ -3172,6 +3172,9 @@ const Ink = {
   // Called from renderPageCanvas every time a page (re)renders, same pattern as Annot.renderOne.
   redrawPage(wrapper, pageNum){
     let canvas=wrapper.querySelector(".inkcanvas");
+    // A full-page canvas per page used to be created for every page ever shown (≈4 MB each) and never freed,
+    // which is what made long books slow down. Only pages that actually have drawings (or while drawing) get one.
+    if(!this.active && !this.strokesForPage(pageNum).length){ if(canvas){ canvas.width=0; canvas.height=0; } return; }
     if(!canvas){
       canvas=el("canvas","inkcanvas");
       wrapper.insertBefore(canvas, wrapper.querySelector(".pdfpagenum"));

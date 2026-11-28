@@ -27,7 +27,7 @@ public class BtServer {
         BluetoothAdapter ad = BluetoothAdapter.getDefaultAdapter();
         if (ad == null) throw new IOException("This device has no Bluetooth.");
         if (!ad.isEnabled()) throw new IOException("Bluetooth is turned off. Turn it on and try again.");
-        server = ad.listenUsingInsecureRfcommWithServiceRecord("Loud Reader Sync", SERVICE);
+        server = ad.listenUsingInsecureRfcommWithServiceRecord("BuX Sync", SERVICE);
         running = true;
         final BluetoothServerSocket ss = server;
         Thread t = new Thread(new Runnable() {

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Loud Reader</string>
-  <key>CFBundleDisplayName</key><string>Loud Reader</string>
+  <key>CFBundleName</key><string>BuX</string>
+  <key>CFBundleDisplayName</key><string>BuX</string>
   <key>CFBundleIdentifier</key><string>com.devise.loudreader.mac</string>
   <key>CFBundleExecutable</key><string>LoudReader</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -12,8 +12,8 @@
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.books</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSBluetoothAlwaysUsageDescription</key><string>Loud Reader can sync your library with your phone over Bluetooth.</string>
-  <key>NSLocalNetworkUsageDescription</key><string>Loud Reader talks to your other devices on this Wi-Fi network to sync your library and reading positions.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>BuX can sync your library with your phone over Bluetooth.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>BuX talks to your other devices on this Wi-Fi network to sync your library and reading positions.</string>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>CFBundleDocumentTypes</key><array>

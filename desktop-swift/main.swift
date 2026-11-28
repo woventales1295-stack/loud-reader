@@ -150,7 +150,7 @@ final class SyncServer {
     }
 }
 
-// Bluetooth (classic RFCOMM) client: talks to the phone's "Loud Reader Sync" service with length-prefixed JSON frames.
+// Bluetooth (classic RFCOMM) client: talks to the phone's "BuX Sync" service with length-prefixed JSON frames.
 final class BTLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     static let uuid: [UInt8] = [0x5a,0x1a,0x3f,0x0e,0x6c,0x0b,0x4f,0x6e,0x9d,0x27,0x4c,0x6f,0x75,0x64,0x52,0x64]
     var addr = ""
@@ -185,7 +185,7 @@ final class BTLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 
     @objc func sdpQueryComplete(_ dev: IOBluetoothDevice!, status: IOReturn) {
-        guard status == kIOReturnSuccess else { finishOpen("The phone doesn't offer the Loud Reader sync service. On the phone, tap \"Wait over Bluetooth\" first."); return }
+        guard status == kIOReturnSuccess else { finishOpen("The phone doesn't offer the BuX sync service. On the phone, tap \"Wait over Bluetooth\" first."); return }
         let u = BTLink.uuid.withUnsafeBytes { IOBluetoothSDPUUID(bytes: $0.baseAddress, length: 16) }
         guard let rec = dev.getServiceRecord(for: u) else { finishOpen("The phone isn't waiting for a sync. On the phone, tap \"Wait over Bluetooth\"."); return }
         var cid: BluetoothRFCOMMChannelID = 0
@@ -284,7 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         web.setValue(false, forKey: "drawsBackground")
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 820),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "Loud Reader"
+        window.title = "BuX"
         window.minSize = NSSize(width: 420, height: 480)
         window.contentView = web
         window.setFrameAutosaveName("LoudReaderMain")
@@ -444,11 +444,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let main = NSMenu()
         let appItem = NSMenuItem(); main.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
-        appMenu.addItem(withTitle: "About Loud Reader", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "About BuX", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Hide Loud Reader", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Hide BuX", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit Loud Reader", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit BuX", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let editItem = NSMenuItem(); main.addItem(editItem)
         let edit = NSMenu(title: "Edit"); editItem.submenu = edit
